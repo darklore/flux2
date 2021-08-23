@@ -10,16 +10,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gruntwork-io/terratest/modules/logger"
 	"github.com/gruntwork-io/terratest/modules/terraform"
 	"github.com/stretchr/testify/require"
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
 
 	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1beta1"
 	"github.com/fluxcd/pkg/apis/meta"
@@ -33,16 +35,21 @@ func TestAzureE2E(t *testing.T) {
 	t.Log("Running Terraform init and apply")
 	terraformOpts := terraform.WithDefaultRetryableErrors(t, &terraform.Options{
 		TerraformDir: "./terraform",
+		Logger:       logger.Discard,
 	})
 	if deferDestroy {
 		defer terraform.Destroy(t, terraformOpts)
 	}
 	terraform.InitAndApply(t, terraformOpts)
-	kubeconfig := terraform.Output(t, terraformOpts, "aks_kube_config")
-	aksHost := terraform.Output(t, terraformOpts, "aks_host")
-	aksCert := terraform.Output(t, terraformOpts, "aks_client_certificate")
-	aksKey := terraform.Output(t, terraformOpts, "aks_client_key")
-	aksCa := terraform.Output(t, terraformOpts, "aks_cluster_ca_certificate")
+	outputs := terraform.OutputAll(t, terraformOpts)
+	azdoPat := outputs["shared_pat"].(string)
+	idRsa := outputs["shared_id_rsa"].(string)
+	idRsaPub := outputs["shared_id_rsa_pub"].(string)
+	kubeconfig := outputs["aks_kube_config"].(string)
+	aksHost := outputs["aks_host"].(string)
+	aksCert := outputs["aks_client_certificate"].(string)
+	aksKey := outputs["aks_client_key"].(string)
+	aksCa := outputs["aks_cluster_ca_certificate"].(string)
 
 	t.Log("Installing Flux")
 	kubeconfigPath, kubeClient, err := getKubernetesCredentials(kubeconfig, aksHost, aksCert, aksKey, aksCa)
@@ -50,8 +57,8 @@ func TestAzureE2E(t *testing.T) {
 	defer os.RemoveAll(filepath.Dir(kubeconfigPath))
 	err = installFlux(ctx, kubeconfigPath)
 	require.NoError(t, err)
-	//err = bootrapFlux(ctx, kubeClient)
-	//require.NoError(t, err)
+	err = bootrapFlux(ctx, kubeClient, azdoPat, idRsa, idRsaPub)
+	require.NoError(t, err)
 
 	t.Log("Verifying Flux installation")
 	require.Eventually(t, func() bool {
@@ -76,19 +83,19 @@ func TestAzureE2E(t *testing.T) {
 		{
 			name:   "https from 'feature' branch",
 			scheme: "https",
-			ref:    "feature",
+			ref:    "feature-branch",
 		},
 		{
 			name:   "https from 'v1' branch",
 			scheme: "https",
-			ref:    "v1",
+			ref:    "v1-tag",
 		},
 	}
 	for _, tt := range applicationNsTest {
 		t.Run(tt.name, func(t *testing.T) {
 			require.Eventually(t, func() bool {
-				namespace := fmt.Sprintf("application-gitops-%s-%s", tt.scheme, tt.ref)
-				name := "application-gitops"
+				name := fmt.Sprintf("application-gitops-%s-%s", tt.scheme, tt.ref)
+				namespace := "flux-system"
 				err := verifyGitAndKustomization(ctx, kubeClient, namespace, name)
 				if err != nil {
 					return false
@@ -143,37 +150,33 @@ func installFlux(ctx context.Context, kubeconfigPath string) error {
 }
 
 // bootrapFlux adds gitrespository and kustomization resources to sync from a repository
-func bootrapFlux(ctx context.Context, kubeClient client.Client) error {
-	privateByte, err := os.ReadFile("../../../id_rsa")
-	if err != nil {
-		return err
-	}
-	publicByte, err := os.ReadFile("../../../id_rsa.pub")
-	if err != nil {
-		return err
-	}
-	secret := corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "flux-system",
-			Namespace: "flux-system",
-		},
-		StringData: map[string]string{
-			"identity":     string(privateByte),
-			"identity.pub": string(publicByte),
+func bootrapFlux(ctx context.Context, kubeClient client.Client, azdoPat, idRsa, idRsaPub string) error {
+	sshCredentials := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "flux-system", Namespace: "flux-system"}}
+	_, err := controllerutil.CreateOrUpdate(ctx, kubeClient, sshCredentials, func() error {
+		sshCredentials.StringData = map[string]string{
+			"identity":     idRsa,
+			"identity.pub": idRsaPub,
 			"known_hosts":  "ssh.dev.azure.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7Hr1oTWqNqOlzGJOfGJ4NakVyIzf1rXYd4d7wo6jBlkLvCA4odBlL0mDUyZ0/QUfTTqeu+tm22gOsv+VrVTMk6vwRU75gY/y9ut5Mb3bR5BV58dKXyq9A9UeB5Cakehn5Zgm6x1mKoVyf+FFn26iYqXJRgzIZZcZ5V6hrE0Qg39kZm4az48o0AUbf6Sp4SLdvnuMa2sVNwHBboS7EJkm57XQPVU3/QpyNLHbWDdzwtrlS+ez30S3AdYhLKEOxAG8weOnyrtLJAUen9mTkol8oII1edf7mWWbWVf0nBmly21+nZcmCTISQBtdcyPaEno7fFQMDD26/s0lfKob4Kw8H",
-		},
-	}
-	err = kubeClient.Create(ctx, &secret, &client.CreateOptions{})
+		}
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-
-	source := &sourcev1.GitRepository{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "flux-system",
-			Namespace: "flux-system",
-		},
-		Spec: sourcev1.GitRepositorySpec{
+	httpsCredentials := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "https-credentials", Namespace: "flux-system"}}
+	_, err = controllerutil.CreateOrUpdate(ctx, kubeClient, httpsCredentials, func() error {
+		httpsCredentials.StringData = map[string]string{
+			"username": "git",
+			"password": azdoPat,
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	source := &sourcev1.GitRepository{ObjectMeta: metav1.ObjectMeta{Name: "flux-system", Namespace: "flux-system"}}
+	_, err = controllerutil.CreateOrUpdate(ctx, kubeClient, source, func() error {
+		source.Spec = sourcev1.GitRepositorySpec{
 			GitImplementation: sourcev1.LibGit2Implementation,
 			Reference: &sourcev1.GitRepositoryRef{
 				Branch: "main",
@@ -182,28 +185,24 @@ func bootrapFlux(ctx context.Context, kubeClient client.Client) error {
 				Name: "flux-system",
 			},
 			URL: "ssh://git@ssh.dev.azure.com/v3/flux-azure/e2e/fleet-infra",
-		},
-	}
-	err = kubeClient.Create(ctx, source, &client.CreateOptions{})
+		}
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-
-	kustomization := &kustomizev1.Kustomization{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "flux-system",
-			Namespace: "flux-system",
-		},
-		Spec: kustomizev1.KustomizationSpec{
+	kustomization := &kustomizev1.Kustomization{ObjectMeta: metav1.ObjectMeta{Name: "flux-system", Namespace: "flux-system"}}
+	_, err = controllerutil.CreateOrUpdate(ctx, kubeClient, kustomization, func() error {
+		kustomization.Spec = kustomizev1.KustomizationSpec{
 			Path: "./clusters/prod",
 			SourceRef: kustomizev1.CrossNamespaceSourceReference{
 				Kind:      sourcev1.GitRepositoryKind,
 				Name:      "flux-system",
 				Namespace: "flux-system",
 			},
-		},
-	}
-	err = kubeClient.Create(ctx, kustomization, &client.CreateOptions{})
+		}
+		return nil
+	})
 	if err != nil {
 		return err
 	}
@@ -222,16 +221,16 @@ func verifyGitAndKustomization(ctx context.Context, kubeClient client.Client, na
 	if err != nil {
 		return err
 	}
-	if apimeta.IsStatusConditionFalse(source.Status.Conditions, meta.ReadyCondition) {
-		return err
+	if apimeta.IsStatusConditionPresentAndEqual(source.Status.Conditions, meta.ReadyCondition, metav1.ConditionTrue) == false {
+		return fmt.Errorf("source condition not ready")
 	}
 	kustomization := &kustomizev1.Kustomization{}
 	err = kubeClient.Get(ctx, nn, kustomization)
 	if err != nil {
 		return err
 	}
-	if apimeta.IsStatusConditionFalse(kustomization.Status.Conditions, meta.ReadyCondition) {
-		return err
+	if apimeta.IsStatusConditionPresentAndEqual(kustomization.Status.Conditions, meta.ReadyCondition, metav1.ConditionTrue) == false {
+		return fmt.Errorf("kustomization condition not ready")
 	}
 	return nil
 }
