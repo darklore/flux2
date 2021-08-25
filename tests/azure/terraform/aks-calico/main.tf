@@ -2,7 +2,7 @@ terraform {
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"
-      version = "2.65.0"
+      version = "2.73.0"
     }
   }
 }
@@ -14,18 +14,22 @@ provider "azurerm" {
 data "azurerm_client_config" "current" {}
 
 # Shared resources between runs
+locals {
+  shared_suffix = "mackerel"
+}
+
 data "azurerm_resource_group" "shared" {
   name = "azure-e2e-shared"
 }
 
 data "azurerm_key_vault" "shared" {
   resource_group_name = data.azurerm_resource_group.shared.name
-  name                = "flux-e2e"
+  name                = "kv-credentials-${local.shared_suffix}"
 }
 
 data "azurerm_key_vault_secret" "shared_pat" {
   key_vault_id = data.azurerm_key_vault.shared.id
-  name         = "azure-e2e-flux"
+  name         = "pat"
 }
 
 data "azurerm_key_vault_secret" "shared_id_rsa" {

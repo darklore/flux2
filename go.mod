@@ -4,6 +4,7 @@ go 1.16
 
 require (
 	github.com/Masterminds/semver/v3 v3.1.0
+	github.com/aws/aws-sdk-go v1.38.28 // indirect
 	github.com/cyphar/filepath-securejoin v0.2.2
 	github.com/fluxcd/go-git-providers v0.1.1
 	github.com/fluxcd/helm-controller/api v0.11.2
@@ -18,9 +19,9 @@ require (
 	github.com/fluxcd/pkg/version v0.0.1
 	github.com/fluxcd/source-controller/api v0.15.4
 	github.com/go-git/go-git/v5 v5.4.2
-	github.com/google/go-cmp v0.5.5
+	github.com/google/go-cmp v0.5.6
 	github.com/google/go-containerregistry v0.2.0
-	github.com/gruntwork-io/terratest v0.36.3
+	github.com/hashicorp/terraform-exec v0.14.0
 	github.com/manifoldco/promptui v0.7.0
 	github.com/mattn/go-shellwords v1.0.12
 	github.com/olekukonko/tablewriter v0.0.4
