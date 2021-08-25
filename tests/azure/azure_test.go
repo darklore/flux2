@@ -90,6 +90,21 @@ func TestAzureE2E(t *testing.T) {
 			scheme: "https",
 			ref:    "v1-tag",
 		},
+		{
+			name:   "ssh from 'main' branch",
+			scheme: "ssh",
+			ref:    "main",
+		},
+		{
+			name:   "ssh from 'feature' branch",
+			scheme: "ssh",
+			ref:    "feature-branch",
+		},
+		{
+			name:   "ssh from 'v1' branch",
+			scheme: "ssh",
+			ref:    "v1-tag",
+		},
 	}
 	for _, tt := range applicationNsTest {
 		t.Run(tt.name, func(t *testing.T) {
