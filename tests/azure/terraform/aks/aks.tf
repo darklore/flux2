@@ -1,8 +1,9 @@
 resource "azurerm_kubernetes_cluster" "this" {
-  name                = "${local.name_prefix}-aks"
+  name                = "aks-${local.name_suffix}"
   location            = azurerm_resource_group.this.location
   resource_group_name = azurerm_resource_group.this.name
-  dns_prefix          = "${local.name_prefix}-k8s"
+
+  dns_prefix = "aks${local.name_suffix}"
 
   default_node_pool {
     name            = "default"
@@ -28,3 +29,10 @@ resource "azurerm_kubernetes_cluster" "this" {
     environment = "e2e"
   }
 }
+
+resource "azurerm_role_assignment" "aks_acr_pull" {
+  scope                = data.azurerm_container_registry.this.id
+  role_definition_name = "AcrPull"
+  principal_id         = azurerm_kubernetes_cluster.this.kubelet_identity[0].object_id
+}
+

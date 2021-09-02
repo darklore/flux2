@@ -1,27 +1,3 @@
-terraform {
-  required_providers {
-    azurerm = {
-      source  = "hashicorp/azurerm"
-      version = "2.73.0"
-    }
-  }
-}
-
-provider "azurerm" {
-  features {}
-}
-
-resource "random_pet" "suffix" {
-  length = 1
-}
-
-data "azurerm_client_config" "current" {}
-
-resource "azurerm_resource_group" "this" {
-  name     = "azure-e2e-shared"
-  location = "West Europe"
-}
-
 resource "azurerm_key_vault" "this" {
   name                = "kv-credentials-${random_pet.suffix.id}"
   resource_group_name = azurerm_resource_group.this.name
@@ -75,11 +51,4 @@ resource "azurerm_key_vault_key" "sops" {
     "decrypt",
     "encrypt",
   ]
-}
-
-resource "azurerm_container_registry" "this" {
-  name                = "acrapps${random_pet.suffix.id}"
-  resource_group_name = azurerm_resource_group.this.name
-  location            = azurerm_resource_group.this.location
-  sku = "standard"
 }

@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -18,7 +18,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	helmv2beta1 "github.com/fluxcd/helm-controller/api/v2beta1"
+	reflectorv1beta1 "github.com/fluxcd/image-reflector-controller/api/v1beta1"
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1beta1"
+	notiv1beta1 "github.com/fluxcd/notification-controller/api/v1beta1"
 	"github.com/fluxcd/pkg/apis/meta"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1beta1"
 )
@@ -47,6 +50,18 @@ func getKubernetesCredentials(kubeconfig, aksHost, aksCert, aksKey, aksCa string
 	if err != nil {
 		return "", nil, err
 	}
+	err = helmv2beta1.AddToScheme(scheme.Scheme)
+	if err != nil {
+		return "", nil, err
+	}
+	err = reflectorv1beta1.AddToScheme(scheme.Scheme)
+	if err != nil {
+		return "", nil, err
+	}
+	err = notiv1beta1.AddToScheme(scheme.Scheme)
+	if err != nil {
+		return "", nil, err
+	}
 	kubeClient, err := client.New(kubeCfg, client.Options{Scheme: scheme.Scheme})
 	if err != nil {
 		return "", nil, err
@@ -55,19 +70,8 @@ func getKubernetesCredentials(kubeconfig, aksHost, aksCert, aksKey, aksCa string
 }
 
 // installFlux adds the core Flux components to the cluster specified in the kubeconfig file.
-func installFlux(ctx context.Context, kubeconfigPath string) error {
-	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(timeoutCtx, "flux", "install", "--components-extra", "image-reflector-controller,image-automation-controller", "--kubeconfig", kubeconfigPath)
-	_, err := cmd.Output()
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-// bootrapFlux adds gitrespository and kustomization resources to sync from a repository
-func bootrapFlux(ctx context.Context, kubeClient client.Client, azdoPat, idRsa, idRsaPub string) error {
+func installFlux(ctx context.Context, kubeClient client.Client, kubeconfigPath, idRsa, idRsaPub, azdoPat string) error {
+	// Add git credentials to flux-system namespace
 	sshCredentials := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "flux-system", Namespace: "flux-system"}}
 	_, err := controllerutil.CreateOrUpdate(ctx, kubeClient, sshCredentials, func() error {
 		sshCredentials.StringData = map[string]string{
@@ -91,39 +95,59 @@ func bootrapFlux(ctx context.Context, kubeClient client.Client, azdoPat, idRsa, 
 	if err != nil {
 		return err
 	}
-	source := &sourcev1.GitRepository{ObjectMeta: metav1.ObjectMeta{Name: "flux-system", Namespace: "flux-system"}}
-	_, err = controllerutil.CreateOrUpdate(ctx, kubeClient, source, func() error {
-		source.Spec = sourcev1.GitRepositorySpec{
-			GitImplementation: sourcev1.LibGit2Implementation,
-			Reference: &sourcev1.GitRepositoryRef{
-				Branch: "main",
-			},
-			SecretRef: &meta.LocalObjectReference{
-				Name: "flux-system",
-			},
-			URL: "ssh://git@ssh.dev.azure.com/v3/flux-azure/e2e/fleet-infra",
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	kustomization := &kustomizev1.Kustomization{ObjectMeta: metav1.ObjectMeta{Name: "flux-system", Namespace: "flux-system"}}
-	_, err = controllerutil.CreateOrUpdate(ctx, kubeClient, kustomization, func() error {
-		kustomization.Spec = kustomizev1.KustomizationSpec{
-			Path: "./clusters/prod",
-			SourceRef: kustomizev1.CrossNamespaceSourceReference{
-				Kind:      sourcev1.GitRepositoryKind,
-				Name:      "flux-system",
-				Namespace: "flux-system",
-			},
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
 
+	// Clone fleet infra repository
+	tmpDir, err := ioutil.TempDir("", "*-fleet-infra")
+	if err != nil {
+		return err
+	}
+	err = runCommand(ctx, tmpDir, "bash", "-c", "git clone ssh://git@ssh.dev.azure.com/v3/flux-azure/e2e/fleet-infra")
+	if err != nil {
+		return err
+	}
+	repoPath := filepath.Join(tmpDir, "fleet-infra")
+
+	// Install Flux and push files to git repository
+	err = runCommand(ctx, repoPath, "bash", "-c", "mkdir -p ./clusters/e2e/flux-system")
+	if err != nil {
+		return err
+	}
+	err = runCommand(ctx, repoPath, "bash", "-c", "flux install --export > ./clusters/e2e/flux-system/gotk-components.yaml")
+	if err != nil {
+		return err
+	}
+	err = runCommand(ctx, repoPath, "bash", "-c", "flux create source git flux-system --git-implementation=libgit2 --url=ssh://git@ssh.dev.azure.com/v3/flux-azure/e2e/fleet-infra --branch=main --secret-ref=flux-system --interval=1m  --export > ./clusters/e2e/flux-system/gotk-sync.yaml")
+	if err != nil {
+		return err
+	}
+	err = runCommand(ctx, repoPath, "bash", "-c", "flux create kustomization flux-system --source=flux-system --path='./clusters/e2e' --prune=true --interval=1m --export >> ./clusters/e2e/flux-system/gotk-sync.yaml")
+	if err != nil {
+		return err
+	}
+	err = runCommand(ctx, repoPath, "bash", "-c", "if [ -z '$(git status --porcelain)' ]; then git add -A && git commit -m 'install flux with sync manifests'; fi;")
+	if err != nil {
+		return err
+	}
+	err = runCommand(ctx, repoPath, "bash", "-c", "git push")
+	if err != nil {
+		return err
+	}
+	err = runCommand(ctx, repoPath, "bash", "-c", fmt.Sprintf("kubectl --kubeconfig=%s apply -f ./clusters/e2e/flux-system/", kubeconfigPath))
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func runCommand(ctx context.Context, dir, name string, args ...string) error {
+	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(timeoutCtx, name, args...)
+	cmd.Dir = dir
+	_, err := cmd.Output()
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -133,7 +157,6 @@ func verifyGitAndKustomization(ctx context.Context, kubeClient client.Client, na
 		Name:      name,
 		Namespace: namespace,
 	}
-	log.Println(nn)
 	source := &sourcev1.GitRepository{}
 	err := kubeClient.Get(ctx, nn, source)
 	if err != nil {
@@ -142,7 +165,6 @@ func verifyGitAndKustomization(ctx context.Context, kubeClient client.Client, na
 	if apimeta.IsStatusConditionPresentAndEqual(source.Status.Conditions, meta.ReadyCondition, metav1.ConditionTrue) == false {
 		return fmt.Errorf("source condition not ready")
 	}
-	log.Println("source")
 	kustomization := &kustomizev1.Kustomization{}
 	err = kubeClient.Get(ctx, nn, kustomization)
 	if err != nil {
@@ -151,6 +173,20 @@ func verifyGitAndKustomization(ctx context.Context, kubeClient client.Client, na
 	if apimeta.IsStatusConditionPresentAndEqual(kustomization.Status.Conditions, meta.ReadyCondition, metav1.ConditionTrue) == false {
 		return fmt.Errorf("kustomization condition not ready")
 	}
-	log.Println("kust")
 	return nil
+}
+
+func getTestManifest(namespace string) string {
+	return fmt.Sprintf(`
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: %s
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: foobar
+  namespace: %s
+`, namespace, namespace)
 }
