@@ -96,53 +96,71 @@ func installFlux(ctx context.Context, kubeClient client.Client, kubeconfigPath, 
 		return err
 	}
 
-	// Clone fleet infra repository
-	tmpDir, err := ioutil.TempDir("", "*-fleet-infra")
-	if err != nil {
-		return err
-	}
-	err = runCommand(ctx, tmpDir, "bash", "-c", "git clone ssh://git@ssh.dev.azure.com/v3/flux-azure/e2e/fleet-infra")
-	if err != nil {
-		return err
-	}
-	repoPath := filepath.Join(tmpDir, "fleet-infra")
-
 	// Install Flux and push files to git repository
-	err = runCommand(ctx, repoPath, "bash", "-c", "mkdir -p ./clusters/e2e/flux-system")
+	repoDir, err := cloneRepo(ctx, "ssh://git@ssh.dev.azure.com/v3/flux-azure/e2e/fleet-infra")
 	if err != nil {
 		return err
 	}
-	err = runCommand(ctx, repoPath, "bash", "-c", "flux install --export > ./clusters/e2e/flux-system/gotk-components.yaml")
+	err = runCommand(ctx, repoDir, "mkdir -p ./clusters/e2e/flux-system")
 	if err != nil {
 		return err
 	}
-	err = runCommand(ctx, repoPath, "bash", "-c", "flux create source git flux-system --git-implementation=libgit2 --url=ssh://git@ssh.dev.azure.com/v3/flux-azure/e2e/fleet-infra --branch=main --secret-ref=flux-system --interval=1m  --export > ./clusters/e2e/flux-system/gotk-sync.yaml")
+	err = runCommand(ctx, repoDir, "flux install --components-extra=\"image-reflector-controller,image-automation-controller\" --export > ./clusters/e2e/flux-system/gotk-components.yaml")
 	if err != nil {
 		return err
 	}
-	err = runCommand(ctx, repoPath, "bash", "-c", "flux create kustomization flux-system --source=flux-system --path='./clusters/e2e' --prune=true --interval=1m --export >> ./clusters/e2e/flux-system/gotk-sync.yaml")
+	err = runCommand(ctx, repoDir, "flux create source git flux-system --git-implementation=libgit2 --url=ssh://git@ssh.dev.azure.com/v3/flux-azure/e2e/fleet-infra --branch=main --secret-ref=flux-system --interval=1m  --export > ./clusters/e2e/flux-system/gotk-sync.yaml")
 	if err != nil {
 		return err
 	}
-	err = runCommand(ctx, repoPath, "bash", "-c", "if [ -z '$(git status --porcelain)' ]; then git add -A && git commit -m 'install flux with sync manifests'; fi;")
+	err = runCommand(ctx, repoDir, "flux create kustomization flux-system --source=flux-system --path='./clusters/e2e' --prune=true --interval=1m --export >> ./clusters/e2e/flux-system/gotk-sync.yaml")
 	if err != nil {
 		return err
 	}
-	err = runCommand(ctx, repoPath, "bash", "-c", "git push")
+	err = runCommand(ctx, repoDir, "if [ \"$(git status --porcelain)\" ]; then git add -A && git commit -m 'install flux with sync manifests'; fi;")
 	if err != nil {
 		return err
 	}
-	err = runCommand(ctx, repoPath, "bash", "-c", fmt.Sprintf("kubectl --kubeconfig=%s apply -f ./clusters/e2e/flux-system/", kubeconfigPath))
+	err = runCommand(ctx, repoDir, "git push")
+	if err != nil {
+		return err
+	}
+	err = runCommand(ctx, repoDir, fmt.Sprintf("kubectl --kubeconfig=%s apply -f ./clusters/e2e/flux-system/", kubeconfigPath))
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func runCommand(ctx context.Context, dir, name string, args ...string) error {
+func cloneRepo(ctx context.Context, repoUrl string) (string, error) {
+	tmpDir, err := ioutil.TempDir("", "*-repository")
+	if err != nil {
+		return "", err
+	}
+	err = runCommand(ctx, tmpDir, fmt.Sprintf("git clone %s repo", repoUrl))
+	if err != nil {
+		return "", err
+	}
+	repoPath := filepath.Join(tmpDir, "repo")
+	return repoPath, nil
+}
+
+func addFileToRepo(ctx context.Context, repoDir, branch, filePath, fileContent string) error {
+	err := runCommand(ctx, repoDir, fmt.Sprintf("git checkout %s", branch))
+	if err != nil {
+		return err
+	}
+	err = runCommand(ctx, repoDir, "if [ \"$(git status --porcelain)\" ]; then git add -A && git commit -m 'add file' && git push; fi;")
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func runCommand(ctx context.Context, dir, command string) error {
 	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(timeoutCtx, name, args...)
+	cmd := exec.CommandContext(timeoutCtx, "bash", "-c", command)
 	cmd.Dir = dir
 	_, err := cmd.Output()
 	if err != nil {

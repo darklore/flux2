@@ -3,7 +3,6 @@ package test
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -142,22 +141,19 @@ func TestAzureDevOpsCloning(t *testing.T) {
 	}
 
 	t.Log("Creating application sources")
-	tmpDir, err := ioutil.TempDir("", "*-cloning-test")
+	repoDir, err := cloneRepo(ctx, "ssh://git@ssh.dev.azure.com/v3/flux-azure/e2e/application-gitops")
 	require.NoError(t, err)
-	err = runCommand(ctx, tmpDir, "bash", "-c", "git clone ssh://git@ssh.dev.azure.com/v3/flux-azure/e2e/application-gitops")
-	require.NoError(t, err)
-	repoPath := filepath.Join(tmpDir, "application-gitops")
-	err = runCommand(ctx, repoPath, "bash", "-c", "git checkout feature/branch")
+	err = runCommand(ctx, repoDir, "git checkout feature/branch")
 	require.NoError(t, err)
 	for _, tt := range tests {
-		err = runCommand(ctx, repoPath, "bash", "-c", fmt.Sprintf("mkdir -p ./cloning-test/%s", tt.name))
+		err = runCommand(ctx, repoDir, fmt.Sprintf("mkdir -p ./cloning-test/%s", tt.name))
 		require.NoError(t, err)
-		err = runCommand(ctx, repoPath, "bash", "-c", fmt.Sprintf("echo '%s' > ./cloning-test/%s/configmap.yaml", getTestManifest(tt.name), tt.name))
+		err = runCommand(ctx, repoDir, fmt.Sprintf("echo '%s' > ./cloning-test/%s/configmap.yaml", getTestManifest(tt.name), tt.name))
 		require.NoError(t, err)
 	}
-	err = runCommand(ctx, repoPath, "bash", "-c", "if [ -z '$(git status --porcelain)' ]; then git add -A && git commit -m 'add application test' && git tag -d v1 && git tag v1; fi;")
+	err = runCommand(ctx, repoDir, "if [ \"$(git status --porcelain)\" ]; then git add -A && git commit -m 'add application test' && git tag -d v1 && git tag v1; fi;")
 	require.NoError(t, err)
-	err = runCommand(ctx, repoPath, "bash", "-c", "git push --tags && git push")
+	err = runCommand(ctx, repoDir, "git push && git push --tags")
 	require.NoError(t, err)
 
 	t.Log("Verifying application-gitops namespaces")
@@ -282,8 +278,10 @@ func TestImageRepositoryACR(t *testing.T) {
 }
 
 func TestKeyVaultSops(t *testing.T) {
+	//ctx := context.TODO()
+
 	// Create encrypted secret with
-	//
+	//secret := ""
 
 }
 
