@@ -6,8 +6,9 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"time"
+
+	git2go "github.com/libgit2/git2go/v31"
 
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -97,7 +98,7 @@ func installFlux(ctx context.Context, kubeClient client.Client, kubeconfigPath, 
 	}
 
 	// Install Flux and push files to git repository
-	repoDir, err := cloneRepo(ctx, "ssh://git@ssh.dev.azure.com/v3/flux-azure/e2e/fleet-infra")
+	repo, repoDir, err := getRepository("https://flux-azure@dev.azure.com/flux-azure/e2e/_git/fleet-infra", "main", azdoPat)
 	if err != nil {
 		return err
 	}
@@ -117,40 +118,49 @@ func installFlux(ctx context.Context, kubeClient client.Client, kubeconfigPath, 
 	if err != nil {
 		return err
 	}
-	err = runCommand(ctx, repoDir, "if [ \"$(git status --porcelain)\" ]; then git add -A && git commit -m 'install flux with sync manifests'; fi;")
+	kustomizeYaml := `
+  resources:
+    - gotk-components.yaml
+    - gotk-sync.yaml
+  patchesStrategicMerge:
+    - |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: kustomize-controller
+        namespace: flux-system
+      spec:
+        template:
+          spec:
+            containers:
+            - name: manager
+              envFrom:
+              - secretRef:
+                  name: azure-sp
+    - |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: source-controller
+        namespace: flux-system
+      spec:
+        template:
+          spec:
+            containers:
+            - name: manager
+              envFrom:
+              - secretRef:
+                  name: azure-sp
+  `
+	err = runCommand(ctx, repoDir, fmt.Sprintf("echo \"%s\" > ./clusters/e2e/flux-system/kustomization.yaml", kustomizeYaml))
 	if err != nil {
 		return err
 	}
-	err = runCommand(ctx, repoDir, "git push")
+	err = commitAndPushAll(repo, "main", azdoPat)
 	if err != nil {
 		return err
 	}
-	err = runCommand(ctx, repoDir, fmt.Sprintf("kubectl --kubeconfig=%s apply -f ./clusters/e2e/flux-system/", kubeconfigPath))
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func cloneRepo(ctx context.Context, repoUrl string) (string, error) {
-	tmpDir, err := ioutil.TempDir("", "*-repository")
-	if err != nil {
-		return "", err
-	}
-	err = runCommand(ctx, tmpDir, fmt.Sprintf("git clone %s repo", repoUrl))
-	if err != nil {
-		return "", err
-	}
-	repoPath := filepath.Join(tmpDir, "repo")
-	return repoPath, nil
-}
-
-func addFileToRepo(ctx context.Context, repoDir, branch, filePath, fileContent string) error {
-	err := runCommand(ctx, repoDir, fmt.Sprintf("git checkout %s", branch))
-	if err != nil {
-		return err
-	}
-	err = runCommand(ctx, repoDir, "if [ \"$(git status --porcelain)\" ]; then git add -A && git commit -m 'add file' && git push; fi;")
+	err = runCommand(ctx, repoDir, fmt.Sprintf("kubectl --kubeconfig=%s apply -k ./clusters/e2e/flux-system/", kubeconfigPath))
 	if err != nil {
 		return err
 	}
@@ -162,9 +172,9 @@ func runCommand(ctx context.Context, dir, command string) error {
 	defer cancel()
 	cmd := exec.CommandContext(timeoutCtx, "bash", "-c", command)
 	cmd.Dir = dir
-	_, err := cmd.Output()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return err
+		return fmt.Errorf("failure to run command %s: %v", string(output), err)
 	}
 	return nil
 }
@@ -207,4 +217,101 @@ metadata:
   name: foobar
   namespace: %s
 `, namespace, namespace)
+}
+
+func getRepository(url, branchName, password string) (*git2go.Repository, string, error) {
+	tmpDir, err := ioutil.TempDir("", "*-repository")
+	if err != nil {
+		return nil, "", err
+	}
+	repo, err := git2go.Clone(url, tmpDir, &git2go.CloneOptions{
+		FetchOptions: &git2go.FetchOptions{
+			DownloadTags: git2go.DownloadTagsNone,
+			RemoteCallbacks: git2go.RemoteCallbacks{
+				CredentialsCallback: credentialCallback("git", password),
+			},
+		},
+		CheckoutBranch: "main",
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	head, err := repo.Head()
+	if err != nil {
+		return nil, "", err
+	}
+	headCommit, err := repo.LookupCommit(head.Target())
+	if err != nil {
+		return nil, "", err
+	}
+	if branchName != "main" {
+		_, err = repo.CreateBranch(branchName, headCommit, true)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+	return repo, tmpDir, nil
+}
+
+func commitAndPushAll(repo *git2go.Repository, branchName, password string) error {
+	idx, err := repo.Index()
+	if err != nil {
+		return err
+	}
+	err = idx.AddAll([]string{}, git2go.IndexAddDefault, nil)
+	if err != nil {
+		return err
+	}
+	treeId, err := idx.WriteTree()
+	if err != nil {
+		return err
+	}
+	err = idx.Write()
+	if err != nil {
+		return err
+	}
+	tree, err := repo.LookupTree(treeId)
+	if err != nil {
+		return err
+	}
+	branch, err := repo.LookupBranch(branchName, git2go.BranchLocal)
+	if err != nil {
+		return err
+	}
+	commitTarget, err := repo.LookupCommit(branch.Target())
+	if err != nil {
+		return err
+	}
+	sig := &git2go.Signature{
+		Name:  "git",
+		Email: "test@example.com",
+		When:  time.Now(),
+	}
+	_, err = repo.CreateCommit(fmt.Sprintf("refs/heads/%s", branchName), sig, sig, "add file", tree, commitTarget)
+	if err != nil {
+		return err
+	}
+	origin, err := repo.Remotes.Lookup("origin")
+	if err != nil {
+		return err
+	}
+	err = origin.Push([]string{fmt.Sprintf("+refs/heads/%s", branchName)}, &git2go.PushOptions{
+		RemoteCallbacks: git2go.RemoteCallbacks{
+			CredentialsCallback: credentialCallback("git", password),
+		},
+	})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func credentialCallback(username, password string) git2go.CredentialsCallback {
+	return func(url string, usernameFromURL string, allowedTypes git2go.CredType) (*git2go.Cred, error) {
+		cred, err := git2go.NewCredUserpassPlaintext(username, password)
+		if err != nil {
+			return nil, err
+		}
+		return cred, nil
+	}
 }

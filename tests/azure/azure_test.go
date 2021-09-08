@@ -30,8 +30,14 @@ import (
 	sourcev1 "github.com/fluxcd/source-controller/api/v1beta1"
 )
 
-var kubeconfigPath string
-var kubeClient client.Client
+type config struct {
+	kubeconfigPath string
+	kubeClient     client.Client
+	azdoPat        string
+	sharedSopsId   string
+}
+
+var cfg config
 
 func TestMain(m *testing.M) {
 	ctx := context.TODO()
@@ -62,6 +68,7 @@ func TestMain(m *testing.M) {
 	azdoPat := outputs["shared_pat"].Value.(string)
 	idRsa := outputs["shared_id_rsa"].Value.(string)
 	idRsaPub := outputs["shared_id_rsa_pub"].Value.(string)
+	sharedSopsId := outputs["shared_sops_id"].Value.(string)
 	kubeconfig := outputs["aks_kube_config"].Value.(string)
 	aksHost := outputs["aks_host"].Value.(string)
 	aksCert := outputs["aks_client_certificate"].Value.(string)
@@ -69,7 +76,7 @@ func TestMain(m *testing.M) {
 	aksCa := outputs["aks_cluster_ca_certificate"].Value.(string)
 
 	log.Println("Creating Kubernetes client")
-	kubeconfigPath, kubeClient, err = getKubernetesCredentials(kubeconfig, aksHost, aksCert, aksKey, aksCa)
+	kubeconfigPath, kubeClient, err := getKubernetesCredentials(kubeconfig, aksHost, aksCert, aksKey, aksCa)
 	if err != nil {
 		log.Fatalf("error create Kubernetes client: %v", err)
 	}
@@ -77,6 +84,13 @@ func TestMain(m *testing.M) {
 	err = installFlux(ctx, kubeClient, kubeconfigPath, idRsa, idRsaPub, azdoPat)
 	if err != nil {
 		log.Fatalf("error installing Flux: %v", err)
+	}
+
+	cfg = config{
+		kubeconfigPath: kubeconfigPath,
+		kubeClient:     kubeClient,
+		azdoPat:        azdoPat,
+		sharedSopsId:   sharedSopsId,
 	}
 
 	log.Println("Running Azure e2e tests")
@@ -96,7 +110,7 @@ func TestMain(m *testing.M) {
 func TestFluxInstallation(t *testing.T) {
 	ctx := context.TODO()
 	require.Eventually(t, func() bool {
-		err := verifyGitAndKustomization(ctx, kubeClient, "flux-system", "flux-system")
+		err := verifyGitAndKustomization(ctx, cfg.kubeClient, "flux-system", "flux-system")
 		if err != nil {
 			return false
 		}
@@ -106,6 +120,7 @@ func TestFluxInstallation(t *testing.T) {
 
 func TestAzureDevOpsCloning(t *testing.T) {
 	ctx := context.TODO()
+	branchName := "feature/branch"
 
 	tests := []struct {
 		name      string
@@ -118,7 +133,7 @@ func TestAzureDevOpsCloning(t *testing.T) {
 			name:      "https-feature-branch",
 			url:       "https://flux-azure@dev.azure.com/flux-azure/e2e/_git/application-gitops",
 			secretRef: "https-credentials",
-			branch:    "feature/branch",
+			branch:    branchName,
 		},
 		{
 			name:      "https-v1",
@@ -130,7 +145,7 @@ func TestAzureDevOpsCloning(t *testing.T) {
 			name:      "ssh-feature-branch",
 			url:       "ssh://git@ssh.dev.azure.com/v3/flux-azure/e2e/application-gitops",
 			secretRef: "flux-system",
-			branch:    "feature/branch",
+			branch:    branchName,
 		},
 		{
 			name:      "ssh-v1",
@@ -141,9 +156,7 @@ func TestAzureDevOpsCloning(t *testing.T) {
 	}
 
 	t.Log("Creating application sources")
-	repoDir, err := cloneRepo(ctx, "ssh://git@ssh.dev.azure.com/v3/flux-azure/e2e/application-gitops")
-	require.NoError(t, err)
-	err = runCommand(ctx, repoDir, "git checkout feature/branch")
+	repo, repoDir, err := getRepository("https://flux-azure@dev.azure.com/flux-azure/e2e/_git/application-gitops", branchName, cfg.azdoPat)
 	require.NoError(t, err)
 	for _, tt := range tests {
 		err = runCommand(ctx, repoDir, fmt.Sprintf("mkdir -p ./cloning-test/%s", tt.name))
@@ -151,16 +164,16 @@ func TestAzureDevOpsCloning(t *testing.T) {
 		err = runCommand(ctx, repoDir, fmt.Sprintf("echo '%s' > ./cloning-test/%s/configmap.yaml", getTestManifest(tt.name), tt.name))
 		require.NoError(t, err)
 	}
-	err = runCommand(ctx, repoDir, "if [ \"$(git status --porcelain)\" ]; then git add -A && git commit -m 'add application test' && git tag -d v1 && git tag v1; fi;")
-	require.NoError(t, err)
-	err = runCommand(ctx, repoDir, "git push && git push --tags")
+	// TODO: Need to create a tag
+	//err = runCommand(ctx, repoDir, "if [ \"$(git status --porcelain)\" ]; then git add -A && git commit -m 'add application test' && git tag -d v1 && git tag v1; fi;")
+	err = commitAndPushAll(repo, branchName, cfg.azdoPat)
 	require.NoError(t, err)
 
 	t.Log("Verifying application-gitops namespaces")
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			source := &sourcev1.GitRepository{ObjectMeta: metav1.ObjectMeta{Name: tt.name, Namespace: "flux-system"}}
-			_, err := controllerutil.CreateOrUpdate(ctx, kubeClient, source, func() error {
+			_, err := controllerutil.CreateOrUpdate(ctx, cfg.kubeClient, source, func() error {
 				source.Spec = sourcev1.GitRepositorySpec{
 					GitImplementation: sourcev1.LibGit2Implementation,
 					Reference: &sourcev1.GitRepositoryRef{
@@ -176,7 +189,7 @@ func TestAzureDevOpsCloning(t *testing.T) {
 			})
 			require.NoError(t, err)
 			kustomization := &kustomizev1.Kustomization{ObjectMeta: metav1.ObjectMeta{Name: tt.name, Namespace: "flux-system"}}
-			_, err = controllerutil.CreateOrUpdate(ctx, kubeClient, kustomization, func() error {
+			_, err = controllerutil.CreateOrUpdate(ctx, cfg.kubeClient, kustomization, func() error {
 				kustomization.Spec = kustomizev1.KustomizationSpec{
 					Path: fmt.Sprintf("./cloning-test/%s", tt.name),
 					SourceRef: kustomizev1.CrossNamespaceSourceReference{
@@ -194,7 +207,7 @@ func TestAzureDevOpsCloning(t *testing.T) {
 			// wait for deployment
 			require.Eventually(t, func() bool {
 				namespace := "flux-system"
-				err := verifyGitAndKustomization(ctx, kubeClient, namespace, tt.name)
+				err := verifyGitAndKustomization(ctx, cfg.kubeClient, namespace, tt.name)
 				if err != nil {
 					return false
 				}
@@ -213,10 +226,10 @@ func TestImageRepositoryACR(t *testing.T) {
 			Name: "acr-image-update-list",
 		},
 	}
-	err := kubeClient.Create(ctx, &namespace)
+	err := cfg.kubeClient.Create(ctx, &namespace)
 	require.NoError(t, err)
 	defer func() {
-		kubeClient.Delete(ctx, &namespace)
+		cfg.kubeClient.Delete(ctx, &namespace)
 		require.NoError(t, err)
 	}()
 
@@ -226,13 +239,13 @@ func TestImageRepositoryACR(t *testing.T) {
 		Namespace: "flux-system",
 	}
 	acrSecret := corev1.Secret{}
-	err = kubeClient.Get(ctx, acrNn, &acrSecret)
+	err = cfg.kubeClient.Get(ctx, acrNn, &acrSecret)
 	require.NoError(t, err)
 	acrSecret.ObjectMeta = metav1.ObjectMeta{
 		Name:      acrNn.Name,
 		Namespace: namespace.Name,
 	}
-	err = kubeClient.Create(ctx, &acrSecret)
+	err = cfg.kubeClient.Create(ctx, &acrSecret)
 	require.NoError(t, err)
 
 	// Create image repository
@@ -251,7 +264,7 @@ func TestImageRepositoryACR(t *testing.T) {
 			},
 		},
 	}
-	err = kubeClient.Create(ctx, &imageRepository)
+	err = cfg.kubeClient.Create(ctx, &imageRepository)
 	require.NoError(t, err)
 
 	// Wait for image repository to be ready
@@ -261,7 +274,7 @@ func TestImageRepositoryACR(t *testing.T) {
 			Namespace: imageRepository.Namespace,
 		}
 		checkIr := reflectorv1beta1.ImageRepository{}
-		err := kubeClient.Get(ctx, nn, &checkIr)
+		err := cfg.kubeClient.Get(ctx, nn, &checkIr)
 		if err != nil {
 			return false
 		}
@@ -278,11 +291,74 @@ func TestImageRepositoryACR(t *testing.T) {
 }
 
 func TestKeyVaultSops(t *testing.T) {
-	//ctx := context.TODO()
+	ctx := context.TODO()
 
-	// Create encrypted secret with
-	//secret := ""
+	repoUrl := "https://git@dev.azure.com/flux-azure/e2e/_git/application-gitops"
+	branchName := "test/keyvault-sops"
+	repo, tmpDir, err := getRepository(repoUrl, branchName, cfg.azdoPat)
 
+	secretYaml := `apiVersion: v1
+kind: Secret
+metadata:
+  name: test
+  namespace: key-vault-sops
+stringData:
+  foo: bar`
+	err = runCommand(ctx, tmpDir, "mkdir -p ./key-vault-sops")
+	require.NoError(t, err)
+	err = runCommand(ctx, tmpDir, fmt.Sprintf("echo \"%s\" > ./key-vault-sops/secret.enc.yaml", secretYaml))
+	err = runCommand(ctx, tmpDir, fmt.Sprintf("sops --encrypt --azure-kv %s --in-place ./key-vault-sops/secret.enc.yaml", cfg.sharedSopsId))
+	require.NoError(t, err)
+
+	err = commitAndPushAll(repo, branchName, cfg.azdoPat)
+	require.NoError(t, err)
+
+	// Create kustomization for sops
+	namespace := corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "key-vault-sops",
+		},
+	}
+	err = cfg.kubeClient.Create(ctx, &namespace)
+	require.NoError(t, err)
+	/*defer func() {
+		cfg.kubeClient.Delete(ctx, &namespace)
+		require.NoError(t, err)
+	}()*/
+	source := &sourcev1.GitRepository{ObjectMeta: metav1.ObjectMeta{Name: "key-vault-sops", Namespace: "flux-system"}}
+	_, err = controllerutil.CreateOrUpdate(ctx, cfg.kubeClient, source, func() error {
+		source.Spec = sourcev1.GitRepositorySpec{
+			GitImplementation: sourcev1.LibGit2Implementation,
+			Reference: &sourcev1.GitRepositoryRef{
+				Branch: branchName,
+			},
+			SecretRef: &meta.LocalObjectReference{
+				Name: "https-credentials",
+			},
+			URL: repoUrl,
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	kustomization := &kustomizev1.Kustomization{ObjectMeta: metav1.ObjectMeta{Name: "key-vault-sops", Namespace: "flux-system"}}
+	_, err = controllerutil.CreateOrUpdate(ctx, cfg.kubeClient, kustomization, func() error {
+		kustomization.Spec = kustomizev1.KustomizationSpec{
+			Path: "./key-vault-sops",
+			//TargetNamespace: namespace.Name,
+			SourceRef: kustomizev1.CrossNamespaceSourceReference{
+				Kind:      sourcev1.GitRepositoryKind,
+				Name:      source.Name,
+				Namespace: source.Namespace,
+			},
+			Interval: metav1.Duration{Duration: 1 * time.Minute},
+			Prune:    true,
+			Decryption: &kustomizev1.Decryption{
+				Provider: "sops",
+			},
+		}
+		return nil
+	})
+	require.NoError(t, err)
 }
 
 /*func TestAzureDevOpsCommitStatus(t *testing.T) {

@@ -13,6 +13,10 @@ output "shared_id_rsa_pub" {
   value = data.azurerm_key_vault_secret.shared_id_rsa_pub.value
 }
 
+output "shared_sops_id" {
+  value = data.azurerm_key_vault_key.sops.id
+}
+
 output "aks_kube_config" {
   sensitive = true
   value = azurerm_kubernetes_cluster.this.kube_config_raw

@@ -1,31 +1,4 @@
-resource "kubernetes_namespace" "flux_system" {
-  metadata {
-    name = "flux-system"
-  }
-
-  lifecycle {
-    ignore_changes = [
-      metadata[0].labels,
-      metadata[0].annotations,
-    ]
-  }
-}
-
-# SAS Secret for eventhub
-resource "kubernetes_secret" "flux_azure_event_hub_sas" {
-  metadata {
-    name = "azure-event-hub-sas"
-    namespace = "flux-system"
-  }
-
-  type = "Opaque"
-
-  data = {
-    address = azurerm_eventhub_authorization_rule.this.primary_connection_string
-  }
-}
-
-# Service Principal for SOPS and ACR
+# Service Principal for Key Vault and ACR
 resource "azuread_application" "flux" {
   display_name = "flux-${local.name_suffix}"
 
@@ -61,12 +34,51 @@ resource "azuread_service_principal_password" "flux" {
 }
 
 resource "azurerm_role_assignment" "acr" {
-  scope                = data.azurerm_container_registry.this.id
+  scope                = data.azurerm_container_registry.shared.id
   role_definition_name = "AcrPull"
   principal_id         = azuread_service_principal.flux.object_id
 }
 
-# Service Principal secret in different required formats
+resource "azurerm_key_vault_access_policy" "sops_decrypt" {
+  key_vault_id = data.azurerm_key_vault.shared.id
+  tenant_id    = data.azurerm_client_config.current.tenant_id
+  object_id    = azuread_service_principal.flux.object_id
+
+  key_permissions = [
+    "Encrypt",
+    "Decrypt",
+    "Get",
+    "List",
+  ]
+}
+
+# Kubernetes resources
+resource "kubernetes_namespace" "flux_system" {
+  metadata {
+    name = "flux-system"
+  }
+
+  lifecycle {
+    ignore_changes = [
+      metadata[0].labels,
+      metadata[0].annotations,
+    ]
+  }
+}
+
+resource "kubernetes_secret" "flux_azure_event_hub_sas" {
+  metadata {
+    name = "azure-event-hub-sas"
+    namespace = "flux-system"
+  }
+
+  type = "Opaque"
+
+  data = {
+    address = azurerm_eventhub_authorization_rule.this.primary_connection_string
+  }
+}
+
 resource "kubernetes_secret" "flux_azure_sp" {
   metadata {
     name = "azure-sp"
@@ -106,7 +118,7 @@ resource "kubernetes_secret" "flux_acr_docker" {
     ".dockerconfigjson" = <<DOCKER
 {
   "auths": {
-    "${data.azurerm_container_registry.this.login_server}": {
+    "${data.azurerm_container_registry.shared.login_server}": {
       "auth": "${base64encode("${azuread_service_principal.flux.application_id}:${azuread_service_principal_password.flux.value}")}"
     }
   }
