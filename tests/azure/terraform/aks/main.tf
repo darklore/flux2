@@ -15,6 +15,10 @@ terraform {
       source = "hashicorp/azuread"
       version = "1.6.0"
     }
+    azuredevops = {
+      source = "microsoft/azuredevops"
+      version = "0.1.7"
+    }
   }
 }
 
@@ -27,6 +31,11 @@ provider "kubernetes" {
   client_certificate     = base64decode(azurerm_kubernetes_cluster.this.kube_config[0].client_certificate)
   client_key             = base64decode(azurerm_kubernetes_cluster.this.kube_config[0].client_key)
   cluster_ca_certificate = base64decode(azurerm_kubernetes_cluster.this.kube_config[0].cluster_ca_certificate)
+}
+
+provider "azuredevops" {
+  org_service_url = "https://dev.azure.com/flux-azure"
+  personal_access_token = data.azurerm_key_vault_secret.shared_pat.value
 }
 
 data "azurerm_client_config" "current" {}

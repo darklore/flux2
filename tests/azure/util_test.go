@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	git2go "github.com/libgit2/git2go/v31"
@@ -71,7 +72,7 @@ func getKubernetesCredentials(kubeconfig, aksHost, aksCert, aksKey, aksCa string
 }
 
 // installFlux adds the core Flux components to the cluster specified in the kubeconfig file.
-func installFlux(ctx context.Context, kubeClient client.Client, kubeconfigPath, idRsa, idRsaPub, azdoPat string) error {
+func installFlux(ctx context.Context, kubeClient client.Client, kubeconfigPath, repoUrl, idRsa, idRsaPub, azdoPat string) error {
 	// Add git credentials to flux-system namespace
 	sshCredentials := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "flux-system", Namespace: "flux-system"}}
 	_, err := controllerutil.CreateOrUpdate(ctx, kubeClient, sshCredentials, func() error {
@@ -98,7 +99,7 @@ func installFlux(ctx context.Context, kubeClient client.Client, kubeconfigPath, 
 	}
 
 	// Install Flux and push files to git repository
-	repo, repoDir, err := getRepository("https://flux-azure@dev.azure.com/flux-azure/e2e/_git/fleet-infra", "main", azdoPat)
+	repo, repoDir, err := getRepository(repoUrl, "main", azdoPat)
 	if err != nil {
 		return err
 	}
@@ -110,7 +111,7 @@ func installFlux(ctx context.Context, kubeClient client.Client, kubeconfigPath, 
 	if err != nil {
 		return err
 	}
-	err = runCommand(ctx, repoDir, "flux create source git flux-system --git-implementation=libgit2 --url=ssh://git@ssh.dev.azure.com/v3/flux-azure/e2e/fleet-infra --branch=main --secret-ref=flux-system --interval=1m  --export > ./clusters/e2e/flux-system/gotk-sync.yaml")
+	err = runCommand(ctx, repoDir, fmt.Sprintf("flux create source git flux-system --git-implementation=libgit2 --url=%s --branch=main --secret-ref=https-credentials --interval=1m  --export > ./clusters/e2e/flux-system/gotk-sync.yaml", repoUrl))
 	if err != nil {
 		return err
 	}
@@ -204,19 +205,67 @@ func verifyGitAndKustomization(ctx context.Context, kubeClient client.Client, na
 	return nil
 }
 
-func getTestManifest(namespace string) string {
-	return fmt.Sprintf(`
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: %s
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: foobar
-  namespace: %s
-`, namespace, namespace)
+func setupNamespace(ctx context.Context, kubeClient client.Client, repoUrl, password, name string) error {
+	namespace := corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, kubeClient, &namespace, func() error {
+		return nil
+	})
+	secret := corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "https-credentials",
+			Namespace: name,
+		},
+	}
+	_, err = controllerutil.CreateOrUpdate(ctx, kubeClient, &secret, func() error {
+		secret.StringData = map[string]string{
+			"username": "git",
+			"password": password,
+		}
+		return nil
+	})
+	source := &sourcev1.GitRepository{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace.Name}}
+	_, err = controllerutil.CreateOrUpdate(ctx, kubeClient, source, func() error {
+		source.Spec = sourcev1.GitRepositorySpec{
+			Interval: metav1.Duration{
+				Duration: 1 * time.Minute,
+			},
+			GitImplementation: sourcev1.LibGit2Implementation,
+			Reference: &sourcev1.GitRepositoryRef{
+				Branch: name,
+			},
+			SecretRef: &meta.LocalObjectReference{
+				Name: "https-credentials",
+			},
+			URL: repoUrl,
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	kustomization := &kustomizev1.Kustomization{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace.Name}}
+	_, err = controllerutil.CreateOrUpdate(ctx, kubeClient, kustomization, func() error {
+		kustomization.Spec = kustomizev1.KustomizationSpec{
+			SourceRef: kustomizev1.CrossNamespaceSourceReference{
+				Kind:      sourcev1.GitRepositoryKind,
+				Name:      source.Name,
+				Namespace: source.Namespace,
+			},
+			Interval: metav1.Duration{
+				Duration: 1 * time.Minute,
+			},
+			Prune: true,
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func getRepository(url, branchName, password string) (*git2go.Repository, string, error) {
@@ -251,6 +300,14 @@ func getRepository(url, branchName, password string) (*git2go.Repository, string
 		}
 	}
 	return repo, tmpDir, nil
+}
+
+func addFile(dir, path, content string) error {
+	err := os.WriteFile(filepath.Join(dir, path), []byte(content), 0777)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func commitAndPushAll(repo *git2go.Repository, branchName, password string) error {
@@ -314,4 +371,19 @@ func credentialCallback(username, password string) git2go.CredentialsCallback {
 		}
 		return cred, nil
 	}
+}
+
+func getTestManifest(namespace string) string {
+	return fmt.Sprintf(`
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: %s
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: foobar
+  namespace: %s
+`, namespace, namespace)
 }

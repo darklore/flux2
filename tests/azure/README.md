@@ -10,7 +10,7 @@ Azure services are actually working now and in the future.
 [x] image-reflector-controller can list tags from Azure Container Registry image repositories
 [ ] kustomize-controller can decrypt secrets using SOPS and Azure Key Vault
 [ ] image-automation-controller can create branches and push to Azure DevOps repositories (https+ssh)
-[ ] notification-controller can send commit status to Azure DevOps
+[x] notification-controller can send commit status to Azure DevOps
 [ ] notification-controller can forward events to Azure Event Hub
 [ ] Network policies do not work with Azure CNI. (flux install --components-extra=image-reflector-controller,image-automation-controller --network-policy=false)
 

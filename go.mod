@@ -26,10 +26,14 @@ require (
 	github.com/libgit2/git2go/v31 v31.6.0
 	github.com/manifoldco/promptui v0.7.0
 	github.com/mattn/go-shellwords v1.0.12
+	github.com/mattn/go-colorable v0.1.4 // indirect
+	github.com/mattn/go-isatty v0.0.11 // indirect
+	github.com/microsoft/azure-devops-go-api/azuredevops v1.0.0-b5
 	github.com/olekukonko/tablewriter v0.0.4
 	github.com/spf13/cobra v1.1.3
 	github.com/spf13/pflag v1.0.5
 	github.com/stretchr/testify v1.7.0
+	github.com/whilp/git-urls v1.0.0
 	go.opencensus.io v0.23.0 // indirect
 	golang.org/x/crypto v0.0.0-20210421170649-83a5a9bb288b
 	k8s.io/api v0.21.3
