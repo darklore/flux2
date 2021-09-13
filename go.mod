@@ -26,8 +26,6 @@ require (
 	github.com/libgit2/git2go/v31 v31.6.0
 	github.com/manifoldco/promptui v0.7.0
 	github.com/mattn/go-shellwords v1.0.12
-	github.com/mattn/go-colorable v0.1.4 // indirect
-	github.com/mattn/go-isatty v0.0.11 // indirect
 	github.com/microsoft/azure-devops-go-api/azuredevops v1.0.0-b5
 	github.com/olekukonko/tablewriter v0.0.4
 	github.com/spf13/cobra v1.1.3

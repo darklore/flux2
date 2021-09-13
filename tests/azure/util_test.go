@@ -21,12 +21,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	helmv2beta1 "github.com/fluxcd/helm-controller/api/v2beta1"
+	automationv1beta1 "github.com/fluxcd/image-automation-controller/api/v1beta1"
 	reflectorv1beta1 "github.com/fluxcd/image-reflector-controller/api/v1beta1"
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1beta1"
 	notiv1beta1 "github.com/fluxcd/notification-controller/api/v1beta1"
 	"github.com/fluxcd/pkg/apis/meta"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1beta1"
 )
+
+const defaultBranch = "main"
 
 // getKubernetesCredentials returns a path to a kubeconfig file and a kube client instance.
 func getKubernetesCredentials(kubeconfig, aksHost, aksCert, aksKey, aksCa string) (string, client.Client, error) {
@@ -57,6 +60,10 @@ func getKubernetesCredentials(kubeconfig, aksHost, aksCert, aksKey, aksCa string
 		return "", nil, err
 	}
 	err = reflectorv1beta1.AddToScheme(scheme.Scheme)
+	if err != nil {
+		return "", nil, err
+	}
+	err = automationv1beta1.AddToScheme(scheme.Scheme)
 	if err != nil {
 		return "", nil, err
 	}
@@ -99,7 +106,7 @@ func installFlux(ctx context.Context, kubeClient client.Client, kubeconfigPath, 
 	}
 
 	// Install Flux and push files to git repository
-	repo, repoDir, err := getRepository(repoUrl, "main", azdoPat)
+	repo, repoDir, err := getRepository(repoUrl, defaultBranch, true, azdoPat)
 	if err != nil {
 		return err
 	}
@@ -111,7 +118,7 @@ func installFlux(ctx context.Context, kubeClient client.Client, kubeconfigPath, 
 	if err != nil {
 		return err
 	}
-	err = runCommand(ctx, repoDir, fmt.Sprintf("flux create source git flux-system --git-implementation=libgit2 --url=%s --branch=main --secret-ref=https-credentials --interval=1m  --export > ./clusters/e2e/flux-system/gotk-sync.yaml", repoUrl))
+	err = runCommand(ctx, repoDir, fmt.Sprintf("flux create source git flux-system --git-implementation=libgit2 --url=%s --branch=%s --secret-ref=https-credentials --interval=1m  --export > ./clusters/e2e/flux-system/gotk-sync.yaml", repoUrl, defaultBranch))
 	if err != nil {
 		return err
 	}
@@ -157,7 +164,7 @@ func installFlux(ctx context.Context, kubeClient client.Client, kubeconfigPath, 
 	if err != nil {
 		return err
 	}
-	err = commitAndPushAll(repo, "main", azdoPat)
+	err = commitAndPushAll(repo, defaultBranch, azdoPat)
 	if err != nil {
 		return err
 	}
@@ -268,22 +275,30 @@ func setupNamespace(ctx context.Context, kubeClient client.Client, repoUrl, pass
 	return nil
 }
 
-func getRepository(url, branchName, password string) (*git2go.Repository, string, error) {
+func getRepository(url, branchName string, overrideBranch bool, password string) (*git2go.Repository, string, error) {
+	checkoutBranch := defaultBranch
+	if overrideBranch == false {
+		checkoutBranch = branchName
+	}
+
 	tmpDir, err := ioutil.TempDir("", "*-repository")
 	if err != nil {
 		return nil, "", err
 	}
 	repo, err := git2go.Clone(url, tmpDir, &git2go.CloneOptions{
 		FetchOptions: &git2go.FetchOptions{
-			DownloadTags: git2go.DownloadTagsNone,
 			RemoteCallbacks: git2go.RemoteCallbacks{
 				CredentialsCallback: credentialCallback("git", password),
 			},
 		},
-		CheckoutBranch: "main",
+		CheckoutBranch: checkoutBranch,
 	})
 	if err != nil {
 		return nil, "", err
+	}
+	// Nothing to do further if correct branch is checked out
+	if checkoutBranch == branchName {
+		return repo, tmpDir, nil
 	}
 	head, err := repo.Head()
 	if err != nil {
@@ -293,11 +308,9 @@ func getRepository(url, branchName, password string) (*git2go.Repository, string
 	if err != nil {
 		return nil, "", err
 	}
-	if branchName != "main" {
-		_, err = repo.CreateBranch(branchName, headCommit, true)
-		if err != nil {
-			return nil, "", err
-		}
+	_, err = repo.CreateBranch(branchName, headCommit, true)
+	if err != nil {
+		return nil, "", err
 	}
 	return repo, tmpDir, nil
 }

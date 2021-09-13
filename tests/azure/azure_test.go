@@ -1,6 +1,7 @@
 package test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -20,7 +21,6 @@ import (
 	giturls "github.com/whilp/git-urls"
 
 	corev1 "k8s.io/api/core/v1"
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -28,6 +28,7 @@ import (
 
 	notiv1beta1 "github.com/fluxcd/notification-controller/api/v1beta1"
 	//helmv2beta1 "github.com/fluxcd/helm-controller/api/v2beta1"
+	automationv1beta1 "github.com/fluxcd/image-automation-controller/api/v1beta1"
 	reflectorv1beta1 "github.com/fluxcd/image-reflector-controller/api/v1beta1"
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1beta1"
 	"github.com/fluxcd/pkg/apis/meta"
@@ -166,7 +167,7 @@ func TestAzureDevOpsCloning(t *testing.T) {
 
 	t.Log("Creating application sources")
 	repoUrl := cfg.applicationRepositoryUrl
-	repo, repoDir, err := getRepository(repoUrl, branchName, cfg.azdoPat)
+	repo, repoDir, err := getRepository(repoUrl, branchName, true, cfg.azdoPat)
 	require.NoError(t, err)
 	for _, tt := range tests {
 		err = runCommand(ctx, repoDir, fmt.Sprintf("mkdir -p ./cloning-test/%s", tt.name))
@@ -229,21 +230,48 @@ func TestAzureDevOpsCloning(t *testing.T) {
 
 func TestImageRepositoryACR(t *testing.T) {
 	ctx := context.TODO()
+	name := "image-repository-acr"
+	repoUrl := cfg.applicationRepositoryUrl
+	oldVersion := "1.0.0"
+	newVersion := "1.0.1"
 
-	// Create namespace for test
-	namespace := corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "acr-image-update-list",
-		},
-	}
-	err := cfg.kubeClient.Create(ctx, &namespace)
+	repo, repoDir, err := getRepository(repoUrl, name, true, cfg.azdoPat)
 	require.NoError(t, err)
-	defer func() {
-		cfg.kubeClient.Delete(ctx, &namespace)
-		require.NoError(t, err)
-	}()
+	manifest := fmt.Sprintf(`
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: podinfo
+      namespace: %s
+    spec:
+      selector:
+        matchLabels:
+          app: podinfo
+      template:
+        metadata:
+          labels:
+            app: podinfo
+        spec:
+          containers:
+          - name: podinfod
+            image: %s/container/podinfo:%s # {"$imagepolicy": "%s:podinfo"}
+            readinessProbe:
+              exec:
+                command:
+                - podcli
+                - check
+                - http
+                - localhost:9898/readyz
+              initialDelaySeconds: 5
+              timeoutSeconds: 5`, name, cfg.acrUrl, oldVersion, name)
+	err = addFile(repoDir, "podinfo.yaml", manifest)
+	require.NoError(t, err)
+	err = commitAndPushAll(repo, name, cfg.azdoPat)
+	require.NoError(t, err)
 
-	// Copy ACR credentials to new namespace
+	err = setupNamespace(ctx, cfg.kubeClient, repoUrl, cfg.azdoPat, name)
+	require.NoError(t, err)
+
 	acrNn := types.NamespacedName{
 		Name:      "acr-docker",
 		Namespace: "flux-system",
@@ -253,18 +281,21 @@ func TestImageRepositoryACR(t *testing.T) {
 	require.NoError(t, err)
 	acrSecret.ObjectMeta = metav1.ObjectMeta{
 		Name:      acrNn.Name,
-		Namespace: namespace.Name,
+		Namespace: name,
 	}
-	err = cfg.kubeClient.Create(ctx, &acrSecret)
+	_, err = controllerutil.CreateOrUpdate(ctx, cfg.kubeClient, &acrSecret, func() error {
+		return nil
+	})
 	require.NoError(t, err)
-
-	// Create image repository
 	imageRepository := reflectorv1beta1.ImageRepository{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "podinfo",
-			Namespace: namespace.Name,
+			Namespace: name,
 		},
-		Spec: reflectorv1beta1.ImageRepositorySpec{
+	}
+	err = cfg.kubeClient.Create(ctx, &imageRepository)
+	_, err = controllerutil.CreateOrUpdate(ctx, cfg.kubeClient, &imageRepository, func() error {
+		imageRepository.Spec = reflectorv1beta1.ImageRepositorySpec{
 			Image: fmt.Sprintf("%s/container/podinfo", cfg.acrUrl),
 			Interval: metav1.Duration{
 				Duration: 1 * time.Minute,
@@ -272,32 +303,82 @@ func TestImageRepositoryACR(t *testing.T) {
 			SecretRef: &meta.LocalObjectReference{
 				Name: acrSecret.Name,
 			},
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	imagePolicy := reflectorv1beta1.ImagePolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "podinfo",
+			Namespace: name,
 		},
 	}
-	err = cfg.kubeClient.Create(ctx, &imageRepository)
+	_, err = controllerutil.CreateOrUpdate(ctx, cfg.kubeClient, &imagePolicy, func() error {
+		imagePolicy.Spec = reflectorv1beta1.ImagePolicySpec{
+			ImageRepositoryRef: meta.LocalObjectReference{
+				Name: imageRepository.Name,
+			},
+			Policy: reflectorv1beta1.ImagePolicyChoice{
+				SemVer: &reflectorv1beta1.SemVerPolicy{
+					Range: "1.0.x",
+				},
+			},
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	imageAutomation := automationv1beta1.ImageUpdateAutomation{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "podinfo",
+			Namespace: name,
+		},
+	}
+	_, err = controllerutil.CreateOrUpdate(ctx, cfg.kubeClient, &imageAutomation, func() error {
+		imageAutomation.Spec = automationv1beta1.ImageUpdateAutomationSpec{
+			Interval: metav1.Duration{
+				Duration: 1 * time.Minute,
+			},
+			SourceRef: automationv1beta1.SourceReference{
+				Kind: "GitRepository",
+				Name: name,
+			},
+			GitSpec: &automationv1beta1.GitSpec{
+				Checkout: &automationv1beta1.GitCheckoutSpec{
+					Reference: sourcev1.GitRepositoryRef{
+						Branch: name,
+					},
+				},
+				Commit: automationv1beta1.CommitSpec{
+					Author: automationv1beta1.CommitUser{
+						Email: "imageautomation@example.com",
+						Name:  "imageautomation",
+					},
+				},
+			},
+		}
+		return nil
+	})
 	require.NoError(t, err)
 
 	// Wait for image repository to be ready
 	require.Eventually(t, func() bool {
-		nn := types.NamespacedName{
-			Name:      imageRepository.Name,
-			Namespace: imageRepository.Namespace,
-		}
-		checkIr := reflectorv1beta1.ImageRepository{}
-		err := cfg.kubeClient.Get(ctx, nn, &checkIr)
+		fmt.Println(name)
+		_, repoDir, err := getRepository(repoUrl, name, false, cfg.azdoPat)
 		if err != nil {
 			return false
 		}
-		if apimeta.IsStatusConditionFalse(checkIr.Status.Conditions, meta.ReadyCondition) {
+		fmt.Println(repoDir)
+		b, err := os.ReadFile(filepath.Join(repoDir, "podinfo.yaml"))
+		fmt.Println(err)
+		if err != nil {
 			return false
 		}
-		if checkIr.Status.LastScanResult.TagCount == 0 {
+		fmt.Println(string(b))
+		if bytes.Contains(b, []byte(newVersion)) == false {
 			return false
 		}
 		return true
-	}, 30*time.Second, 1*time.Second)
-
-	// Check that the change has been comitted and changed
+	}, 60*time.Second, 5*time.Second)
 }
 
 func TestKeyVaultSops(t *testing.T) {
@@ -305,7 +386,7 @@ func TestKeyVaultSops(t *testing.T) {
 	repoUrl := cfg.applicationRepositoryUrl
 	branchName := "test/keyvault-sops"
 
-	repo, tmpDir, err := getRepository(repoUrl, branchName, cfg.azdoPat)
+	repo, tmpDir, err := getRepository(repoUrl, branchName, true, cfg.azdoPat)
 	secretYaml := `apiVersion: v1
 kind: Secret
 metadata:
@@ -375,7 +456,7 @@ func TestAzureDevOpsCommitStatus(t *testing.T) {
 	name := "commit-status"
 	repoUrl := cfg.applicationRepositoryUrl
 
-	repo, repoDir, err := getRepository(repoUrl, name, cfg.azdoPat)
+	repo, repoDir, err := getRepository(repoUrl, name, true, cfg.azdoPat)
 	require.NoError(t, err)
 	manifest := fmt.Sprintf(`
     apiVersion: v1
