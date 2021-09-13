@@ -53,7 +53,7 @@ func TestMain(m *testing.M) {
 	teardown := false
 
 	log.Println("Setting up Azure test infrastructure")
-	execPath, err := tfinstall.Find(ctx, tfinstall.ExactPath("/usr/bin/terraform"))
+	execPath, err := tfinstall.Find(ctx, &whichTerraform{})
 	if err != nil {
 		log.Fatalf("terraform exec path not found: %v", err)
 	}
@@ -65,10 +65,10 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		log.Fatalf("error running init: %v", err)
 	}
-	/*err = tf.Apply(ctx)
+	err = tf.Apply(ctx)
 	if err != nil {
 		log.Fatalf("error running apply: %v", err)
-	}*/
+	}
 	state, err := tf.Show(ctx)
 	if err != nil {
 		log.Fatalf("error running show: %v", err)

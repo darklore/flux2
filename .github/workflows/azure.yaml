@@ -7,7 +7,7 @@ on:
     branches: [ main ]
 
 jobs:
-  kind:
+  e2e:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -26,7 +26,23 @@ jobs:
       - name: Build Flux CLI
         run: |
           make build
-          which flux
+          ls bin
+      - name: Install libgit2
+        run: |
+          sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 648ACFD622F3D138
+          sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 0E98404D386FA1D9
+          echo "deb http://deb.debian.org/debian unstable main" | sudo tee -a /etc/apt/sources.list
+          echo "deb-src http://deb.debian.org/debian unstable main" | sudo tee -a /etc/apt/sources.list
+          sudo apt-get update
+          sudo apt-get install -y --allow-downgrades libgit2-dev/unstable zlib1g-dev/unstable libssh2-1-dev/unstable libpcre3-dev/unstable
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 0.15.3
       - name: Run Azure e2e tests
         run: |
-          make build
+          export PATH=$PATH:./bin
+          which flux
+          which terraform
+          cd ./tests/azure
+          go test
