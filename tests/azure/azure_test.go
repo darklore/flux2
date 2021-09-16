@@ -487,7 +487,7 @@ stringData:
 	require.NoError(t, err)
 	err = runCommand(ctx, tmpDir, fmt.Sprintf("echo \"%s\" > ./key-vault-sops/secret.enc.yaml", secretYaml))
 	require.NoError(t, err)
-	err = runCommand(ctx, tmpDir, fmt.Sprintf("sops --encrypt --azure-kv %s --in-place ./key-vault-sops/secret.enc.yaml", cfg.sopsId))
+	err = runCommand(ctx, tmpDir, fmt.Sprintf("sops --encrypt --encrypted-regex '^(data|stringData)$' --azure-kv %s --in-place ./key-vault-sops/secret.enc.yaml", cfg.sopsId))
 	require.NoError(t, err)
 	err = commitAndPushAll(repo, name, cfg.azdoPat)
 	require.NoError(t, err)
@@ -536,7 +536,7 @@ stringData:
 			return false
 		}
 		return true
-	}, 5*time.Second, 1*time.Second)
+	}, 60*time.Second, 1*time.Second)
 }
 
 func TestAzureDevOpsCommitStatus(t *testing.T) {
