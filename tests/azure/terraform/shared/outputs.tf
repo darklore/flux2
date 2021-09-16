@@ -8,8 +8,11 @@ output "azure_devops_sp" {
 
 output "github_sp" {
   value = {
+    tenant_id = data.azurerm_client_config.current.tenant_id
+    subscription_id = data.azurerm_client_config.current.subscription_id
     client_id = azuread_service_principal.github.application_id
     client_secret = azuread_service_principal_password.github.value
   }
   sensitive = true
 }
+
