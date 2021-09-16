@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	//eventhub "github.com/Azure/azure-event-hubs-go/v3"
+	eventhub "github.com/Azure/azure-event-hubs-go/v3"
 	"github.com/hashicorp/terraform-exec/tfexec"
 	"github.com/hashicorp/terraform-exec/tfinstall"
 	git2go "github.com/libgit2/git2go/v31"
@@ -49,6 +49,7 @@ type config struct {
 	fluxAzureSp spConfig
 	sopsId      string
 	acr         acrConfig
+	eventHubSas string
 }
 
 type spConfig struct {
@@ -109,6 +110,7 @@ func TestMain(m *testing.M) {
 	fluxAzureSp := outputs["flux_azure_sp"].Value.(map[string]interface{})
 	sharedSopsId := outputs["sops_id"].Value.(string)
 	acr := outputs["acr"].Value.(map[string]interface{})
+	eventHubSas := outputs["event_hub_sas"].Value.(string)
 
 	log.Println("Creating Kubernetes client")
 	kubeconfigPath, kubeClient, err := getKubernetesCredentials(kubeconfig, aksHost, aksCert, aksKey, aksCa)
@@ -143,6 +145,7 @@ func TestMain(m *testing.M) {
 			username: acr["username"].(string),
 			password: acr["password"].(string),
 		},
+		eventHubSas: eventHubSas,
 	}
 
 	err = installFlux(ctx, kubeClient, kubeconfigPath, cfg.fleetInfraRepository.http, azdoPat, cfg.fluxAzureSp)
@@ -525,6 +528,16 @@ stringData:
 		return nil
 	})
 	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		nn := types.NamespacedName{Name: "test", Namespace: name}
+		secret := &corev1.Secret{}
+		err = cfg.kubeClient.Get(ctx, nn, secret)
+		if err != nil {
+			return false
+		}
+		return true
+	}, 5*time.Second, 1*time.Second)
 }
 
 func TestAzureDevOpsCommitStatus(t *testing.T) {
@@ -653,94 +666,125 @@ func TestAzureDevOpsCommitStatus(t *testing.T) {
 	}, 300*time.Second, 5*time.Second)
 }
 
-/*func TestEventHubNotification(t *testing.T) {
+func TestEventHubNotification(t *testing.T) {
 	ctx := context.TODO()
+	name := "event-hub"
+	repoUrl := cfg.applicationRepository.http
+	manifest := fmt.Sprintf(`
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: foobar
+      namespace: %s
+  `, name)
 
-	// Create namespace for test
-	namespace := corev1.Namespace{
+	repo, repoDir, err := getRepository(repoUrl, name, true, cfg.azdoPat)
+	require.NoError(t, err)
+	err = addFile(repoDir, "configmap.yaml", manifest)
+	require.NoError(t, err)
+	err = commitAndPushAll(repo, name, cfg.azdoPat)
+	require.NoError(t, err)
+
+	err = setupNamespace(ctx, cfg.kubeClient, repoUrl, cfg.azdoPat, name)
+	require.NoError(t, err)
+	kustomization := &kustomizev1.Kustomization{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: name}}
+	_, err = controllerutil.CreateOrUpdate(ctx, cfg.kubeClient, kustomization, func() error {
+		kustomization.Spec.HealthChecks = []meta.NamespacedObjectKindReference{
+			{
+				APIVersion: "v1",
+				Kind:       "ConfigMap",
+				Name:       "foobar",
+				Namespace:  name,
+			},
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		err := verifyGitAndKustomization(ctx, cfg.kubeClient, name, name)
+		if err != nil {
+			return false
+		}
+		return true
+	}, 10*time.Second, 1*time.Second)
+
+	secret := corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "event-hub-notifications",
+			Name:      name,
+			Namespace: name,
 		},
 	}
-	err := kubeClient.Create(ctx, &namespace)
-	require.NoError(t, err)
-	defer func() {
-		kubeClient.Delete(ctx, &namespace)
-		require.NoError(t, err)
-	}()
-
-	// Copy ACR credentials to new namespace
-	eventHubNn := types.NamespacedName{
-		Name:      "azure-event-hub-sas",
-		Namespace: "flux-system",
-	}
-	eventHubSecret := corev1.Secret{}
-	err = kubeClient.Get(ctx, eventHubNn, &eventHubSecret)
-	require.NoError(t, err)
-	eventHubSecret.ObjectMeta = metav1.ObjectMeta{
-		Name:      eventHubNn.Name,
-		Namespace: namespace.Name,
-	}
-	err = kubeClient.Create(ctx, &eventHubSecret)
-	require.NoError(t, err)
-
-	// Create event hub provider
+	_, err = controllerutil.CreateOrUpdate(ctx, cfg.kubeClient, &secret, func() error {
+		secret.StringData = map[string]string{
+			"address": cfg.eventHubSas,
+		}
+		return nil
+	})
 	provider := notiv1beta1.Provider{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "event-hub",
-			Namespace: namespace.Name,
-		},
-		Spec: notiv1beta1.ProviderSpec{
-			Type:    "azureeventhub",
-			Channel: "flux",
-			SecretRef: &meta.LocalObjectReference{
-				Name: eventHubSecret.Name,
-			},
+			Name:      name,
+			Namespace: name,
 		},
 	}
-	err = kubeClient.Create(ctx, &provider)
+	_, err = controllerutil.CreateOrUpdate(ctx, cfg.kubeClient, &provider, func() error {
+		provider.Spec = notiv1beta1.ProviderSpec{
+			Type:    "azureeventhub",
+			Address: repoUrl,
+			SecretRef: &meta.LocalObjectReference{
+				Name: name,
+			},
+		}
+		return nil
+	})
 	require.NoError(t, err)
-
-	// Create alert
 	alert := notiv1beta1.Alert{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "event-hub",
-			Namespace: namespace.Name,
+			Name:      name,
+			Namespace: name,
 		},
-		Spec: notiv1beta1.AlertSpec{
+	}
+	_, err = controllerutil.CreateOrUpdate(ctx, cfg.kubeClient, &alert, func() error {
+		alert.Spec = notiv1beta1.AlertSpec{
 			ProviderRef: meta.LocalObjectReference{
 				Name: provider.Name,
 			},
 			EventSources: []notiv1beta1.CrossNamespaceObjectReference{
 				{
-					Kind:      "GitRepository",
-					Name:      "flux-system",
-					Namespace: "flux-system",
+					Kind:      "Kustomization",
+					Name:      name,
+					Namespace: name,
 				},
 			},
-		},
-	}
-	err = kubeClient.Create(ctx, &alert)
+		}
+		return nil
+	})
 	require.NoError(t, err)
 
-	// Wait for message in event hub
-	address := string(eventHubSecret.Data["address"])
-	fmt.Println(address)
-	hub, err := eventhub.NewHubFromConnectionString(address)
+	hub, err := eventhub.NewHubFromConnectionString(cfg.eventHubSas)
 	require.NoError(t, err)
-	runtimeInfo, err := hub.GetRuntimeInformation(ctx)
-	require.NoError(t, err)
-	handler := func(c context.Context, event *eventhub.Event) error {
-		fmt.Println(string(event.Data))
+	c := make(chan string)
+	handler := func(ctx context.Context, event *eventhub.Event) error {
+		c <- string(event.Data)
 		return nil
 	}
-	for _, partitionID := range runtimeInfo.PartitionIDs {
-		listenerHandle, err := hub.Receive(ctx, partitionID, handler)
-		require.NoError(t, err)
-		listenerHandle.Close(ctx)
-	}
-	require.Equal(t, 1, 0)
-}*/
+	runtimeInfo, err := hub.GetRuntimeInformation(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, len(runtimeInfo.PartitionIDs))
+	listenerHandler, err := hub.Receive(ctx, runtimeInfo.PartitionIDs[0], handler)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		select {
+		case <-c:
+			return true
+		default:
+			return false
+		}
+	}, 15*time.Second, 5*time.Second)
+	err = listenerHandler.Close(ctx)
+	require.NoError(t, err)
+	err = hub.Close(ctx)
+	require.NoError(t, err)
+}
 
 // TODO: Enable when source-controller supports Helm charts from OCI sources.
 /*func TestACRHelmRelease(t *testing.T) {

@@ -3,7 +3,7 @@ module github.com/fluxcd/flux2
 go 1.16
 
 require (
-	github.com/Azure/go-autorest/autorest v0.11.18 // indirect
+	github.com/Azure/azure-event-hubs-go/v3 v3.3.13
 	github.com/Masterminds/semver/v3 v3.1.0
 	github.com/aws/aws-sdk-go v1.38.28 // indirect
 	github.com/cyphar/filepath-securejoin v0.2.2
@@ -32,7 +32,6 @@ require (
 	github.com/spf13/pflag v1.0.5
 	github.com/stretchr/testify v1.7.0
 	github.com/whilp/git-urls v1.0.0
-	go.opencensus.io v0.23.0 // indirect
 	golang.org/x/crypto v0.0.0-20210421170649-83a5a9bb288b
 	k8s.io/api v0.21.3
 	k8s.io/apiextensions-apiserver v0.21.3
