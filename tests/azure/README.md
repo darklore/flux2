@@ -33,11 +33,22 @@ The following tests are currently implemented:
 [x] Flux can be successfully installed on AKS using the CLI e.g.:
 [x] source-controller can clone Azure DevOps repositories (https+ssh)
 [x] image-reflector-controller can list tags from Azure Container Registry image repositories
-[ ] kustomize-controller can decrypt secrets using SOPS and Azure Key Vault
+[x] kustomize-controller can decrypt secrets using SOPS and Azure Key Vault
 [x] image-automation-controller can create branches and push to Azure DevOps repositories (https+ssh)
 [x] notification-controller can send commit status to Azure DevOps
 [x] notification-controller can forward events to Azure Event Hub
 [x] source-controller can pull charts from Azure Container Registry Helm repositories
+
+## Give User Access
+
+There are a couple of steps required when adding a new user to get access to the Azure portal and Azure DevOps. To begin with add the new user to
+[Azure AD](https://portal.azure.com/#blade/Microsoft_AAD_IAM/UsersManagementMenuBlade/MsGraphUsers), and add the user to the [Azure AD group
+flux-contributors](https://portal.azure.com/#blade/Microsoft_AAD_IAM/GroupDetailsMenuBlade/Overview/groupId/24e0f3f6-6555-4d3d-99ab-414c869cab5d). The
+new users should now go through the invite process, and be able to sign in to both the Azure Portal and Azure DevOps.
+
+After the new user has signed into Azure DevOps you will need to modify the users permissions. This cannot be done before the user has signed in a
+first time. In the [organization users page](https://dev.azure.com/flux-azure/_settings/users) chose "Manage User" and set the "Access Level" to basic
+and make the user "Project Contributor" of the "e2e" Azure DevOps project.
 
 ## Development
 
