@@ -3,6 +3,7 @@ package test
 import (
 	"bytes"
 	"context"
+	b64 "encoding/base64"
 	"fmt"
 	"log"
 	"os"
@@ -26,11 +27,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	notiv1beta1 "github.com/fluxcd/notification-controller/api/v1beta1"
-	//helmv2beta1 "github.com/fluxcd/helm-controller/api/v2beta1"
 	automationv1beta1 "github.com/fluxcd/image-automation-controller/api/v1beta1"
 	reflectorv1beta1 "github.com/fluxcd/image-reflector-controller/api/v1beta1"
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1beta1"
+	notiv1beta1 "github.com/fluxcd/notification-controller/api/v1beta1"
 	"github.com/fluxcd/pkg/apis/meta"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1beta1"
 )
@@ -39,11 +39,33 @@ type config struct {
 	kubeconfigPath string
 	kubeClient     client.Client
 
-	azdoPat                  string
-	sharedSopsId             string
-	acrUrl                   string
-	fleetInfraRepositoryUrl  string
-	applicationRepositoryUrl string
+	azdoPat               string
+	idRsa                 string
+	idRsaPub              string
+	knownHosts            string
+	fleetInfraRepository  repoConfig
+	applicationRepository repoConfig
+
+	fluxAzureSp spConfig
+	sopsId      string
+	acr         acrConfig
+}
+
+type spConfig struct {
+	tenantId     string
+	clientId     string
+	clientSecret string
+}
+
+type repoConfig struct {
+	http string
+	ssh  string
+}
+
+type acrConfig struct {
+	url      string
+	username string
+	password string
 }
 
 var cfg config
@@ -65,27 +87,28 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		log.Fatalf("error running init: %v", err)
 	}
-	err = tf.Apply(ctx)
+	/*err = tf.Apply(ctx)
 	if err != nil {
 		log.Fatalf("error running apply: %v", err)
-	}
+	}*/
 	state, err := tf.Show(ctx)
 	if err != nil {
 		log.Fatalf("error running show: %v", err)
 	}
 	outputs := state.Values.Outputs
-	azdoPat := outputs["shared_pat"].Value.(string)
-	idRsa := outputs["shared_id_rsa"].Value.(string)
-	idRsaPub := outputs["shared_id_rsa_pub"].Value.(string)
-	sharedSopsId := outputs["shared_sops_id"].Value.(string)
-	acrUrl := outputs["acr_url"].Value.(string)
 	kubeconfig := outputs["aks_kube_config"].Value.(string)
 	aksHost := outputs["aks_host"].Value.(string)
 	aksCert := outputs["aks_client_certificate"].Value.(string)
 	aksKey := outputs["aks_client_key"].Value.(string)
 	aksCa := outputs["aks_cluster_ca_certificate"].Value.(string)
-	fleetInfraRepositoryUrl := outputs["fleet_infra_repository_url"].Value.(string)
-	applicationRepositoryUrl := outputs["application_repository_url"].Value.(string)
+	azdoPat := outputs["shared_pat"].Value.(string)
+	idRsa := outputs["shared_id_rsa"].Value.(string)
+	idRsaPub := outputs["shared_id_rsa_pub"].Value.(string)
+	fleetInfraRepository := outputs["fleet_infra_repository"].Value.(map[string]interface{})
+	applicationRepository := outputs["application_repository"].Value.(map[string]interface{})
+	fluxAzureSp := outputs["flux_azure_sp"].Value.(map[string]interface{})
+	sharedSopsId := outputs["sops_id"].Value.(string)
+	acr := outputs["acr"].Value.(map[string]interface{})
 
 	log.Println("Creating Kubernetes client")
 	kubeconfigPath, kubeClient, err := getKubernetesCredentials(kubeconfig, aksHost, aksCert, aksKey, aksCa)
@@ -93,19 +116,38 @@ func TestMain(m *testing.M) {
 		log.Fatalf("error create Kubernetes client: %v", err)
 	}
 	defer os.RemoveAll(filepath.Dir(kubeconfigPath))
-	err = installFlux(ctx, kubeClient, kubeconfigPath, fleetInfraRepositoryUrl, idRsa, idRsaPub, azdoPat)
-	if err != nil {
-		log.Fatalf("error installing Flux: %v", err)
-	}
 
 	cfg = config{
-		kubeconfigPath:           kubeconfigPath,
-		kubeClient:               kubeClient,
-		azdoPat:                  azdoPat,
-		sharedSopsId:             sharedSopsId,
-		acrUrl:                   acrUrl,
-		fleetInfraRepositoryUrl:  fleetInfraRepositoryUrl,
-		applicationRepositoryUrl: applicationRepositoryUrl,
+		kubeconfigPath: kubeconfigPath,
+		kubeClient:     kubeClient,
+		azdoPat:        azdoPat,
+		idRsa:          idRsa,
+		idRsaPub:       idRsaPub,
+		knownHosts:     "ssh.dev.azure.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7Hr1oTWqNqOlzGJOfGJ4NakVyIzf1rXYd4d7wo6jBlkLvCA4odBlL0mDUyZ0/QUfTTqeu+tm22gOsv+VrVTMk6vwRU75gY/y9ut5Mb3bR5BV58dKXyq9A9UeB5Cakehn5Zgm6x1mKoVyf+FFn26iYqXJRgzIZZcZ5V6hrE0Qg39kZm4az48o0AUbf6Sp4SLdvnuMa2sVNwHBboS7EJkm57XQPVU3/QpyNLHbWDdzwtrlS+ez30S3AdYhLKEOxAG8weOnyrtLJAUen9mTkol8oII1edf7mWWbWVf0nBmly21+nZcmCTISQBtdcyPaEno7fFQMDD26/s0lfKob4Kw8H",
+		fleetInfraRepository: repoConfig{
+			http: fleetInfraRepository["http"].(string),
+			ssh:  fleetInfraRepository["ssh"].(string),
+		},
+		applicationRepository: repoConfig{
+			http: applicationRepository["http"].(string),
+			ssh:  applicationRepository["ssh"].(string),
+		},
+		fluxAzureSp: spConfig{
+			tenantId:     fluxAzureSp["tenant_id"].(string),
+			clientId:     fluxAzureSp["client_id"].(string),
+			clientSecret: fluxAzureSp["client_secret"].(string),
+		},
+		sopsId: sharedSopsId,
+		acr: acrConfig{
+			url:      acr["url"].(string),
+			username: acr["username"].(string),
+			password: acr["password"].(string),
+		},
+	}
+
+	err = installFlux(ctx, kubeClient, kubeconfigPath, cfg.fleetInfraRepository.http, azdoPat, cfg.fluxAzureSp)
+	if err != nil {
+		log.Fatalf("error installing Flux: %v", err)
 	}
 
 	log.Println("Running Azure e2e tests")
@@ -136,77 +178,120 @@ func TestFluxInstallation(t *testing.T) {
 func TestAzureDevOpsCloning(t *testing.T) {
 	ctx := context.TODO()
 	branchName := "feature/branch"
+	tagName := "v1"
 
 	tests := []struct {
 		name      string
-		secretRef string
-		branch    string
-		tag       string
+		refType   string
+		cloneType string
 	}{
 		{
 			name:      "https-feature-branch",
-			secretRef: "https-credentials",
-			branch:    branchName,
+			refType:   "branch",
+			cloneType: "http",
 		},
 		{
 			name:      "https-v1",
-			secretRef: "https-credentials",
-			tag:       "v1",
+			refType:   "tag",
+			cloneType: "http",
 		},
 		{
 			name:      "ssh-feature-branch",
-			secretRef: "flux-system",
-			branch:    branchName,
+			refType:   "branch",
+			cloneType: "ssh",
 		},
 		{
 			name:      "ssh-v1",
-			secretRef: "flux-system",
-			tag:       "v1",
+			refType:   "tag",
+			cloneType: "ssh",
 		},
 	}
 
 	t.Log("Creating application sources")
-	repoUrl := cfg.applicationRepositoryUrl
-	repo, repoDir, err := getRepository(repoUrl, branchName, true, cfg.azdoPat)
+	repo, repoDir, err := getRepository(cfg.applicationRepository.http, branchName, true, cfg.azdoPat)
 	require.NoError(t, err)
 	for _, tt := range tests {
+		manifest := fmt.Sprintf(`
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: foobar
+        namespace: %s
+    `, tt.name)
 		err = runCommand(ctx, repoDir, fmt.Sprintf("mkdir -p ./cloning-test/%s", tt.name))
 		require.NoError(t, err)
-		err = runCommand(ctx, repoDir, fmt.Sprintf("echo '%s' > ./cloning-test/%s/configmap.yaml", getTestManifest(tt.name), tt.name))
+		err = runCommand(ctx, repoDir, fmt.Sprintf("echo '%s' > ./cloning-test/%s/configmap.yaml", manifest, tt.name))
 		require.NoError(t, err)
 	}
-	// TODO: Need to create a tag
-	//err = runCommand(ctx, repoDir, "if [ \"$(git status --porcelain)\" ]; then git add -A && git commit -m 'add application test' && git tag -d v1 && git tag v1; fi;")
 	err = commitAndPushAll(repo, branchName, cfg.azdoPat)
+	require.NoError(t, err)
+	err = createTagAndPush(repo, branchName, tagName, cfg.azdoPat)
 	require.NoError(t, err)
 
 	t.Log("Verifying application-gitops namespaces")
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			source := &sourcev1.GitRepository{ObjectMeta: metav1.ObjectMeta{Name: tt.name, Namespace: "flux-system"}}
-			_, err := controllerutil.CreateOrUpdate(ctx, cfg.kubeClient, source, func() error {
+			ref := &sourcev1.GitRepositoryRef{
+				Branch: branchName,
+			}
+			if tt.refType == "tag" {
+				ref = &sourcev1.GitRepositoryRef{
+					Tag: tagName,
+				}
+			}
+			url := cfg.applicationRepository.http
+			secretData := map[string]string{
+				"username": "git",
+				"password": cfg.azdoPat,
+			}
+			if tt.cloneType == "ssh" {
+				url = cfg.applicationRepository.ssh
+				secretData = map[string]string{
+					"identity":     cfg.idRsa,
+					"identity.pub": cfg.idRsaPub,
+					"known_hosts":  cfg.knownHosts,
+				}
+			}
+
+			namespace := corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: tt.name,
+				},
+			}
+			_, err := controllerutil.CreateOrUpdate(ctx, cfg.kubeClient, &namespace, func() error {
+				return nil
+			})
+			gitSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "git-credentials",
+					Namespace: namespace.Name,
+				},
+			}
+			_, err = controllerutil.CreateOrUpdate(ctx, cfg.kubeClient, gitSecret, func() error {
+				gitSecret.StringData = secretData
+				return nil
+			})
+			source := &sourcev1.GitRepository{ObjectMeta: metav1.ObjectMeta{Name: tt.name, Namespace: namespace.Name}}
+			_, err = controllerutil.CreateOrUpdate(ctx, cfg.kubeClient, source, func() error {
 				source.Spec = sourcev1.GitRepositorySpec{
 					GitImplementation: sourcev1.LibGit2Implementation,
-					Reference: &sourcev1.GitRepositoryRef{
-						Branch: tt.branch,
-						Tag:    tt.tag,
-					},
+					Reference:         ref,
 					SecretRef: &meta.LocalObjectReference{
-						Name: tt.secretRef,
+						Name: gitSecret.Name,
 					},
-					URL: repoUrl,
+					URL: url,
 				}
 				return nil
 			})
 			require.NoError(t, err)
-			kustomization := &kustomizev1.Kustomization{ObjectMeta: metav1.ObjectMeta{Name: tt.name, Namespace: "flux-system"}}
+			kustomization := &kustomizev1.Kustomization{ObjectMeta: metav1.ObjectMeta{Name: tt.name, Namespace: namespace.Name}}
 			_, err = controllerutil.CreateOrUpdate(ctx, cfg.kubeClient, kustomization, func() error {
 				kustomization.Spec = kustomizev1.KustomizationSpec{
 					Path: fmt.Sprintf("./cloning-test/%s", tt.name),
 					SourceRef: kustomizev1.CrossNamespaceSourceReference{
 						Kind:      sourcev1.GitRepositoryKind,
 						Name:      tt.name,
-						Namespace: "flux-system",
+						Namespace: namespace.Name,
 					},
 					Interval: metav1.Duration{Duration: 1 * time.Minute},
 					Prune:    true,
@@ -215,15 +300,20 @@ func TestAzureDevOpsCloning(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			// wait for deployment
+			// Wait for configmap to be deployed
 			require.Eventually(t, func() bool {
-				namespace := "flux-system"
-				err := verifyGitAndKustomization(ctx, cfg.kubeClient, namespace, tt.name)
+				err := verifyGitAndKustomization(ctx, cfg.kubeClient, namespace.Name, tt.name)
+				if err != nil {
+					return false
+				}
+				nn := types.NamespacedName{Name: "foobar", Namespace: namespace.Name}
+				cm := &corev1.ConfigMap{}
+				err = cfg.kubeClient.Get(ctx, nn, cm)
 				if err != nil {
 					return false
 				}
 				return true
-			}, 10*time.Second, 1*time.Second)
+			}, 30*time.Second, 1*time.Second)
 		})
 	}
 }
@@ -231,12 +321,9 @@ func TestAzureDevOpsCloning(t *testing.T) {
 func TestImageRepositoryACR(t *testing.T) {
 	ctx := context.TODO()
 	name := "image-repository-acr"
-	repoUrl := cfg.applicationRepositoryUrl
+	repoUrl := cfg.applicationRepository.http
 	oldVersion := "1.0.0"
 	newVersion := "1.0.1"
-
-	repo, repoDir, err := getRepository(repoUrl, name, true, cfg.azdoPat)
-	require.NoError(t, err)
 	manifest := fmt.Sprintf(`
     apiVersion: apps/v1
     kind: Deployment
@@ -263,7 +350,10 @@ func TestImageRepositoryACR(t *testing.T) {
                 - http
                 - localhost:9898/readyz
               initialDelaySeconds: 5
-              timeoutSeconds: 5`, name, cfg.acrUrl, oldVersion, name)
+              timeoutSeconds: 5`, name, cfg.acr.url, oldVersion, name)
+
+	repo, repoDir, err := getRepository(repoUrl, name, true, cfg.azdoPat)
+	require.NoError(t, err)
 	err = addFile(repoDir, "podinfo.yaml", manifest)
 	require.NoError(t, err)
 	err = commitAndPushAll(repo, name, cfg.azdoPat)
@@ -271,19 +361,20 @@ func TestImageRepositoryACR(t *testing.T) {
 
 	err = setupNamespace(ctx, cfg.kubeClient, repoUrl, cfg.azdoPat, name)
 	require.NoError(t, err)
-
-	acrNn := types.NamespacedName{
-		Name:      "acr-docker",
-		Namespace: "flux-system",
-	}
-	acrSecret := corev1.Secret{}
-	err = cfg.kubeClient.Get(ctx, acrNn, &acrSecret)
-	require.NoError(t, err)
-	acrSecret.ObjectMeta = metav1.ObjectMeta{
-		Name:      acrNn.Name,
-		Namespace: name,
-	}
+	acrSecret := corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "acr-docker", Namespace: name}}
 	_, err = controllerutil.CreateOrUpdate(ctx, cfg.kubeClient, &acrSecret, func() error {
+		acrSecret.Type = corev1.SecretTypeDockerConfigJson
+		acrSecret.StringData = map[string]string{
+			".dockerconfigjson": fmt.Sprintf(`
+        {
+          "auths": {
+            "%s": {
+              "auth": "%s"
+            }
+          }
+        }
+        `, cfg.acr.url, b64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", cfg.acr.username, cfg.acr.password)))),
+		}
 		return nil
 	})
 	require.NoError(t, err)
@@ -293,10 +384,9 @@ func TestImageRepositoryACR(t *testing.T) {
 			Namespace: name,
 		},
 	}
-	err = cfg.kubeClient.Create(ctx, &imageRepository)
 	_, err = controllerutil.CreateOrUpdate(ctx, cfg.kubeClient, &imageRepository, func() error {
 		imageRepository.Spec = reflectorv1beta1.ImageRepositorySpec{
-			Image: fmt.Sprintf("%s/container/podinfo", cfg.acrUrl),
+			Image: fmt.Sprintf("%s/container/podinfo", cfg.acr.url),
 			Interval: metav1.Duration{
 				Duration: 1 * time.Minute,
 			},
@@ -362,18 +452,14 @@ func TestImageRepositoryACR(t *testing.T) {
 
 	// Wait for image repository to be ready
 	require.Eventually(t, func() bool {
-		fmt.Println(name)
 		_, repoDir, err := getRepository(repoUrl, name, false, cfg.azdoPat)
 		if err != nil {
 			return false
 		}
-		fmt.Println(repoDir)
 		b, err := os.ReadFile(filepath.Join(repoDir, "podinfo.yaml"))
-		fmt.Println(err)
 		if err != nil {
 			return false
 		}
-		fmt.Println(string(b))
 		if bytes.Contains(b, []byte(newVersion)) == false {
 			return false
 		}
@@ -383,10 +469,9 @@ func TestImageRepositoryACR(t *testing.T) {
 
 func TestKeyVaultSops(t *testing.T) {
 	ctx := context.TODO()
-	repoUrl := cfg.applicationRepositoryUrl
+	name := "key-vault-sops"
+	repoUrl := cfg.applicationRepository.http
 	branchName := "test/keyvault-sops"
-
-	repo, tmpDir, err := getRepository(repoUrl, branchName, true, cfg.azdoPat)
 	secretYaml := `apiVersion: v1
 kind: Secret
 metadata:
@@ -394,28 +479,20 @@ metadata:
   namespace: "key-vault-sops"
 stringData:
   foo: "bar"`
+
+	repo, tmpDir, err := getRepository(repoUrl, branchName, true, cfg.azdoPat)
 	err = runCommand(ctx, tmpDir, "mkdir -p ./key-vault-sops")
 	require.NoError(t, err)
 	err = runCommand(ctx, tmpDir, fmt.Sprintf("echo \"%s\" > ./key-vault-sops/secret.enc.yaml", secretYaml))
-	err = runCommand(ctx, tmpDir, fmt.Sprintf("sops --encrypt --azure-kv %s --in-place ./key-vault-sops/secret.enc.yaml", cfg.sharedSopsId))
 	require.NoError(t, err)
-
+	err = runCommand(ctx, tmpDir, fmt.Sprintf("sops --encrypt --azure-kv %s --in-place ./key-vault-sops/secret.enc.yaml", cfg.sopsId))
+	require.NoError(t, err)
 	err = commitAndPushAll(repo, branchName, cfg.azdoPat)
 	require.NoError(t, err)
 
-	// Create kustomization for sops
-	namespace := corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "key-vault-sops",
-		},
-	}
-	err = cfg.kubeClient.Create(ctx, &namespace)
+	err = setupNamespace(ctx, cfg.kubeClient, repoUrl, cfg.azdoPat, name)
 	require.NoError(t, err)
-	/*defer func() {
-		cfg.kubeClient.Delete(ctx, &namespace)
-		require.NoError(t, err)
-	}()*/
-	source := &sourcev1.GitRepository{ObjectMeta: metav1.ObjectMeta{Name: "key-vault-sops", Namespace: "flux-system"}}
+	source := &sourcev1.GitRepository{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: name}}
 	_, err = controllerutil.CreateOrUpdate(ctx, cfg.kubeClient, source, func() error {
 		source.Spec = sourcev1.GitRepositorySpec{
 			GitImplementation: sourcev1.LibGit2Implementation,
@@ -430,11 +507,10 @@ stringData:
 		return nil
 	})
 	require.NoError(t, err)
-	kustomization := &kustomizev1.Kustomization{ObjectMeta: metav1.ObjectMeta{Name: "key-vault-sops", Namespace: "flux-system"}}
+	kustomization := &kustomizev1.Kustomization{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: name}}
 	_, err = controllerutil.CreateOrUpdate(ctx, cfg.kubeClient, kustomization, func() error {
 		kustomization.Spec = kustomizev1.KustomizationSpec{
 			Path: "./key-vault-sops",
-			//TargetNamespace: namespace.Name,
 			SourceRef: kustomizev1.CrossNamespaceSourceReference{
 				Kind:      sourcev1.GitRepositoryKind,
 				Name:      source.Name,
@@ -454,10 +530,7 @@ stringData:
 func TestAzureDevOpsCommitStatus(t *testing.T) {
 	ctx := context.TODO()
 	name := "commit-status"
-	repoUrl := cfg.applicationRepositoryUrl
-
-	repo, repoDir, err := getRepository(repoUrl, name, true, cfg.azdoPat)
-	require.NoError(t, err)
+	repoUrl := cfg.applicationRepository.http
 	manifest := fmt.Sprintf(`
     apiVersion: v1
     kind: ConfigMap
@@ -465,6 +538,9 @@ func TestAzureDevOpsCommitStatus(t *testing.T) {
       name: foobar
       namespace: %s
   `, name)
+
+	repo, repoDir, err := getRepository(repoUrl, name, true, cfg.azdoPat)
+	require.NoError(t, err)
 	err = addFile(repoDir, "configmap.yaml", manifest)
 	require.NoError(t, err)
 	err = commitAndPushAll(repo, name, cfg.azdoPat)
@@ -557,7 +633,6 @@ func TestAzureDevOpsCommitStatus(t *testing.T) {
 	require.NoError(t, err)
 	commit, err := repo.LookupCommit(branch.Target())
 	rev := commit.Id().String()
-	fmt.Println(rev)
 	connection := azuredevops.NewPatConnection(orgUrl, cfg.azdoPat)
 	client, err := git.NewClient(ctx, connection)
 	require.NoError(t, err)
@@ -571,12 +646,11 @@ func TestAzureDevOpsCommitStatus(t *testing.T) {
 		if err != nil {
 			return false
 		}
-		fmt.Println(*statuses)
 		if len(*statuses) != 1 {
 			return false
 		}
 		return true
-	}, 120*time.Second, 5*time.Second)
+	}, 300*time.Second, 5*time.Second)
 }
 
 /*func TestEventHubNotification(t *testing.T) {

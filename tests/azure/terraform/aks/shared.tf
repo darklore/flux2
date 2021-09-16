@@ -30,8 +30,3 @@ data "azurerm_key_vault_secret" "shared_id_rsa_pub" {
   key_vault_id = data.azurerm_key_vault.shared.id
   name         = "id-rsa-pub"
 }
-
-data "azurerm_key_vault_key" "sops" {
-  key_vault_id = data.azurerm_key_vault.shared.id
-  name         = "sops"
-}

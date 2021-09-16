@@ -79,25 +79,32 @@ func getKubernetesCredentials(kubeconfig, aksHost, aksCert, aksKey, aksCa string
 }
 
 // installFlux adds the core Flux components to the cluster specified in the kubeconfig file.
-func installFlux(ctx context.Context, kubeClient client.Client, kubeconfigPath, repoUrl, idRsa, idRsaPub, azdoPat string) error {
-	// Add git credentials to flux-system namespace
-	sshCredentials := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "flux-system", Namespace: "flux-system"}}
-	_, err := controllerutil.CreateOrUpdate(ctx, kubeClient, sshCredentials, func() error {
-		sshCredentials.StringData = map[string]string{
-			"identity":     idRsa,
-			"identity.pub": idRsaPub,
-			"known_hosts":  "ssh.dev.azure.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7Hr1oTWqNqOlzGJOfGJ4NakVyIzf1rXYd4d7wo6jBlkLvCA4odBlL0mDUyZ0/QUfTTqeu+tm22gOsv+VrVTMk6vwRU75gY/y9ut5Mb3bR5BV58dKXyq9A9UeB5Cakehn5Zgm6x1mKoVyf+FFn26iYqXJRgzIZZcZ5V6hrE0Qg39kZm4az48o0AUbf6Sp4SLdvnuMa2sVNwHBboS7EJkm57XQPVU3/QpyNLHbWDdzwtrlS+ez30S3AdYhLKEOxAG8weOnyrtLJAUen9mTkol8oII1edf7mWWbWVf0nBmly21+nZcmCTISQBtdcyPaEno7fFQMDD26/s0lfKob4Kw8H",
+func installFlux(ctx context.Context, kubeClient client.Client, kubeconfigPath, repoUrl, azdoPat string, sp spConfig) error {
+	namespace := corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "flux-system",
+		},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, cfg.kubeClient, &namespace, func() error {
+		return nil
+	})
+	httpsCredentials := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "https-credentials", Namespace: "flux-system"}}
+	_, err = controllerutil.CreateOrUpdate(ctx, kubeClient, httpsCredentials, func() error {
+		httpsCredentials.StringData = map[string]string{
+			"username": "git",
+			"password": azdoPat,
 		}
 		return nil
 	})
 	if err != nil {
 		return err
 	}
-	httpsCredentials := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "https-credentials", Namespace: "flux-system"}}
-	_, err = controllerutil.CreateOrUpdate(ctx, kubeClient, httpsCredentials, func() error {
+	azureSp := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "azure-sp", Namespace: "flux-system"}}
+	_, err = controllerutil.CreateOrUpdate(ctx, kubeClient, azureSp, func() error {
 		httpsCredentials.StringData = map[string]string{
-			"username": "git",
-			"password": azdoPat,
+			"AZURE_TENANT_ID":     sp.tenantId,
+			"AZURE_CLIENT_ID":     sp.clientId,
+			"AZURE_CLIENT_SECRET": sp.clientSecret,
 		}
 		return nil
 	})
@@ -366,6 +373,51 @@ func commitAndPushAll(repo *git2go.Repository, branchName, password string) erro
 		return err
 	}
 	err = origin.Push([]string{fmt.Sprintf("+refs/heads/%s", branchName)}, &git2go.PushOptions{
+		RemoteCallbacks: git2go.RemoteCallbacks{
+			CredentialsCallback: credentialCallback("git", password),
+		},
+	})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func createTagAndPush(repo *git2go.Repository, branchName, tag, password string) error {
+	branch, err := repo.LookupBranch(branchName, git2go.BranchAll)
+	if err != nil {
+		return err
+	}
+	commit, err := repo.LookupCommit(branch.Target())
+	if err != nil {
+		return err
+	}
+	err = repo.Tags.Remove(tag)
+	if err != nil {
+		return err
+	}
+	sig := &git2go.Signature{
+		Name:  "git",
+		Email: "test@example.com",
+		When:  time.Now(),
+	}
+	_, err = repo.Tags.Create(tag, commit, sig, "create tag")
+	if err != nil {
+		return err
+	}
+	origin, err := repo.Remotes.Lookup("origin")
+	if err != nil {
+		return err
+	}
+	err = origin.Push([]string{fmt.Sprintf(":refs/tags/%s", tag)}, &git2go.PushOptions{
+		RemoteCallbacks: git2go.RemoteCallbacks{
+			CredentialsCallback: credentialCallback("git", password),
+		},
+	})
+	if err != nil {
+		return err
+	}
+	err = origin.Push([]string{fmt.Sprintf("+refs/tags/%s", tag)}, &git2go.PushOptions{
 		RemoteCallbacks: git2go.RemoteCallbacks{
 			CredentialsCallback: credentialCallback("git", password),
 		},

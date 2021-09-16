@@ -26,15 +26,8 @@ provider "azurerm" {
   features {}
 }
 
-provider "kubernetes" {
-  host                   = azurerm_kubernetes_cluster.this.kube_config[0].host
-  client_certificate     = base64decode(azurerm_kubernetes_cluster.this.kube_config[0].client_certificate)
-  client_key             = base64decode(azurerm_kubernetes_cluster.this.kube_config[0].client_key)
-  cluster_ca_certificate = base64decode(azurerm_kubernetes_cluster.this.kube_config[0].cluster_ca_certificate)
-}
-
 provider "azuredevops" {
-  org_service_url = "https://dev.azure.com/flux-azure"
+  org_service_url = "https://dev.azure.com/${local.azure_devops_org}"
   personal_access_token = data.azurerm_key_vault_secret.shared_pat.value
 }
 
@@ -43,6 +36,7 @@ data "azurerm_client_config" "current" {}
 resource "random_pet" "suffix" {}
 
 locals {
+  azure_devops_org = "flux-azure"
   name_suffix = "e2e-${random_pet.suffix.id}"
 }
 
