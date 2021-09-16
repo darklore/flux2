@@ -474,7 +474,6 @@ func TestKeyVaultSops(t *testing.T) {
 	ctx := context.TODO()
 	name := "key-vault-sops"
 	repoUrl := cfg.applicationRepository.http
-	branchName := "test/keyvault-sops"
 	secretYaml := `apiVersion: v1
 kind: Secret
 metadata:
@@ -483,14 +482,14 @@ metadata:
 stringData:
   foo: "bar"`
 
-	repo, tmpDir, err := getRepository(repoUrl, branchName, true, cfg.azdoPat)
+	repo, tmpDir, err := getRepository(repoUrl, name, true, cfg.azdoPat)
 	err = runCommand(ctx, tmpDir, "mkdir -p ./key-vault-sops")
 	require.NoError(t, err)
 	err = runCommand(ctx, tmpDir, fmt.Sprintf("echo \"%s\" > ./key-vault-sops/secret.enc.yaml", secretYaml))
 	require.NoError(t, err)
 	err = runCommand(ctx, tmpDir, fmt.Sprintf("sops --encrypt --azure-kv %s --in-place ./key-vault-sops/secret.enc.yaml", cfg.sopsId))
 	require.NoError(t, err)
-	err = commitAndPushAll(repo, branchName, cfg.azdoPat)
+	err = commitAndPushAll(repo, name, cfg.azdoPat)
 	require.NoError(t, err)
 
 	err = setupNamespace(ctx, cfg.kubeClient, repoUrl, cfg.azdoPat, name)
@@ -500,7 +499,7 @@ stringData:
 		source.Spec = sourcev1.GitRepositorySpec{
 			GitImplementation: sourcev1.LibGit2Implementation,
 			Reference: &sourcev1.GitRepositoryRef{
-				Branch: branchName,
+				Branch: name,
 			},
 			SecretRef: &meta.LocalObjectReference{
 				Name: "https-credentials",

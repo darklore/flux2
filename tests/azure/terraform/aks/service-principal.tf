@@ -1,4 +1,3 @@
-# Service Principal for Key Vault and ACR
 resource "azuread_application" "flux" {
   display_name = "flux-${local.name_suffix}"
 

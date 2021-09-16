@@ -101,7 +101,7 @@ func installFlux(ctx context.Context, kubeClient client.Client, kubeconfigPath, 
 	}
 	azureSp := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "azure-sp", Namespace: "flux-system"}}
 	_, err = controllerutil.CreateOrUpdate(ctx, kubeClient, azureSp, func() error {
-		httpsCredentials.StringData = map[string]string{
+		azureSp.StringData = map[string]string{
 			"AZURE_TENANT_ID":     sp.tenantId,
 			"AZURE_CLIENT_ID":     sp.clientId,
 			"AZURE_CLIENT_SECRET": sp.clientSecret,
