@@ -17,7 +17,6 @@ limitations under the License.
 package main
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -26,26 +25,23 @@ import (
 var completionZshCmd = &cobra.Command{
 	Use:   "zsh",
 	Short: "Generates zsh completion scripts",
-	Example: `To load completion run
+	Example: `If shell completion is not already enabled in your environment,
+you will need to enable it. You can execute the following once:
 
-. <(flux completion zsh)
+echo "autoload -U compinit; compinit" >> ~/.zshrc
 
-To configure your zsh shell to load completions for each session add to your zshrc
-
-# ~/.zshrc or ~/.profile
-command -v flux >/dev/null && . <(flux completion zsh)
-
-or write a cached file in one of the completion directories in your ${fpath}:
+To load completions for each session, write a cached file in one of the completion directories in your ${fpath}:
 
 echo "${fpath// /\n}" | grep -i completion
 flux completion zsh > _flux
 
 mv _flux ~/.oh-my-zsh/completions  # oh-my-zsh
-mv _flux ~/.zprezto/modules/completion/external/src/  # zprezto`,
+mv _flux ~/.zprezto/modules/completion/external/src/  # zprezto
+mv _flux "${fpath[1]}/_flux" # others
+
+You will need to start a new shell for this setup to take effect`,
 	Run: func(cmd *cobra.Command, args []string) {
 		rootCmd.GenZshCompletion(os.Stdout)
-		// Cobra doesn't source zsh completion file, explicitly doing it here
-		// fmt.Println("compdef _flux flux")
 	},
 }
 
