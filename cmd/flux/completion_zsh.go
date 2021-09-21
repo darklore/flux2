@@ -45,7 +45,7 @@ mv _flux ~/.zprezto/modules/completion/external/src/  # zprezto`,
 	Run: func(cmd *cobra.Command, args []string) {
 		rootCmd.GenZshCompletion(os.Stdout)
 		// Cobra doesn't source zsh completion file, explicitly doing it here
-		fmt.Println("compdef _flux flux")
+		// fmt.Println("compdef _flux flux")
 	},
 }
 
